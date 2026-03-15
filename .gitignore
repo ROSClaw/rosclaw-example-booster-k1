@@ -1,0 +1,5 @@
+.env
+.docker/
+checkpoints/*.pt
+checkpoints/*.onnx
+checkpoints/*.jit
