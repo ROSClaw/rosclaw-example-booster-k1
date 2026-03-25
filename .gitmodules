@@ -1,0 +1,3 @@
+[submodule "real-hardware/src/booster_robotics_sdk_ros2"]
+	path = real-hardware/src/booster_robotics_sdk_ros2
+	url = https://github.com/BoosterRobotics/booster_robotics_sdk_ros2

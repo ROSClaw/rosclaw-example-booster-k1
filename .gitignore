@@ -1,5 +1,16 @@
 .env
 .docker/
+__pycache__/
+*.pyc
 checkpoints/*.pt
 checkpoints/*.onnx
 checkpoints/*.jit
+real-hardware/ws/
+real-hardware/generated/*.env
+real-hardware/generated/*.xml
+real-hardware/generated/*.log
+real-hardware/build/
+real-hardware/install/
+real-hardware/log/
+real-hardware/dds-profile.fixed.xml
+real-hardware/dds-profile.host.xml
