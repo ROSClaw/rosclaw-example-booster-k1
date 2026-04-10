@@ -1,5 +1,24 @@
-.env
+simulators/isaac-sim/.docker/
+simulators/isaac-sim/.env
 .docker/
-checkpoints/*.pt
-checkpoints/*.onnx
-checkpoints/*.jit
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.swo
+
+# Local generated simulator/runtime state.
+isaac-sim-runtime/logs/
+isaac-sim-runtime/vendor/booster_assets/
+isaac-sim-runtime/vendor/booster_train/
+
+# Local ROS 2 build products.
+real-hardware/build/
+real-hardware/install/
+real-hardware/log/
+
+# Local policy/checkpoint experiments.
+*.pt
+*.pth
+*.onnx

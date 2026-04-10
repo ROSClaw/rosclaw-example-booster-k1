@@ -1,0 +1,15 @@
+[submodule "external/booster-k1-rl"]
+	path = external/booster-k1-rl
+	url = https://github.com/MarcoDotIO/Booster-K1-RL-Isaac-Lab-Walking-Policy-Trainer
+[submodule "external/rosclaw-ros2"]
+	path = external/rosclaw-ros2
+	url = https://github.com/ROSClaw/rosclaw-ros2
+[submodule "external/rosclaw-plugin"]
+	path = external/rosclaw-plugin
+	url = https://github.com/ROSClaw/rosclaw-plugin
+[submodule "real-hardware/src/booster_robotics_sdk_ros2"]
+	path = real-hardware/src/booster_robotics_sdk_ros2
+	url = https://github.com/BoosterRobotics/booster_robotics_sdk_ros2
+[submodule "external/booster-assets"]
+	path = external/booster-assets
+	url = https://github.com/BoosterRobotics/booster_assets

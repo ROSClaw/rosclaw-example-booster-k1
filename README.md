@@ -1,161 +1,103 @@
-# ROSClaw Booster K1 Isaac Example
+# ROSClaw Booster K1 Example
 
-This example packages a single-container Booster K1 Isaac Sim demo that ROSClaw
-can drive through the local `rosclaw-plugin` checkout.
+This repo contains the Booster K1 example wiring for ROSClaw/OpenClaw and the
+Isaac Sim 5.x helper runtime. External code is referenced as git submodules;
+local modifications for those repos are kept as patch files under `patches/`
+and are applied by the setup script.
 
-The default runtime is now a gravity-free slide mode, not the walking-policy
-path. It uses the existing Booster motion-replay stack in frozen mode, holds
-the robot on a fixed K1 pose, and applies `/k1/cmd_vel` by sliding the robot
-base through the scene. That keeps ROSClaw integration, rosbridge, odometry,
-camera topics, and `/k1/cmd_vel` working without depending on policy balance or
-sim2real locomotion behavior.
+## External Setup
 
-## Prerequisites
-
-- Linux host with NVIDIA GPU, Docker Engine, Docker Compose plugin, and NVIDIA
-  Container Toolkit installed.
-- Sibling checkouts at `../rosclaw-plugin` and `../rosclaw-ros2`.
-- Sibling K1 runtime sources at:
-  - `../../Isaac-Sim-Go2/ROSClaw-Vision`
-  - `../../Isaac-Sim-Go2/Booster-K1/booster_train`
-  - `../../Isaac-Sim-Go2/Booster-K1/booster_assets`
-- NVIDIA Isaac Sim WebRTC Streaming Client installed on the machine that will
-  view the simulation.
-- OpenClaw Gateway already installed and working locally.
-
-## Quick Start
-
-1. Prepare the env file and Isaac cache directories:
-
-   ```bash
-   cp .env.example .env
-   mkdir -p ./.docker/isaac-sim/cache/{kit,ov,pip,glcache,computecache}
-   mkdir -p ./.docker/isaac-sim/{logs,data,documents}
-   ```
-
-2. Build and start the K1 container:
-
-   ```bash
-   docker compose --env-file .env up --build -d k1-sim
-   ```
-
-   If your machine already has a local `k1-isaac-sim:5.0.0` image from the
-   `ROSClaw-Vision` stack, you can set `ISAAC_SIM_BASE_IMAGE=k1-isaac-sim:5.0.0`
-   in `.env` to reuse its bundled Isaac Lab install and shorten rebuilds.
-
-3. Follow startup until Isaac and ROSClaw are both ready:
-
-   ```bash
-   docker compose --env-file .env logs -f k1-sim
-   ```
-
-   Wait for:
-
-   ```text
-   [entrypoint] Booster K1 runtime ready: Isaac streaming on :49100 and rosbridge is listening on :9090
-   ```
-
-   During startup, also watch for the slide-mode lines. You should see:
-
-   ```text
-   [entrypoint] Policy disabled for control mode motion_replay
-   [motion_replay] creating interactive scene (freeze_motion=True start_frame=53 disable_gravity=True)
-   ```
-
-4. Connect the NVIDIA Isaac Sim WebRTC Streaming Client to the Docker host.
-
-   - If the viewer is on the same machine, connect to `127.0.0.1`.
-   - If the viewer is on another LAN machine, set `PUBLIC_IP` in `.env` before
-     starting the container, then connect to that host.
-
-5. Install the local ROSClaw plugin into OpenClaw:
-
-   ```bash
-   openclaw plugins install --link ../rosclaw-plugin
-   ```
-
-6. Configure the plugin to use rosbridge.
-
-   Use [config/rosclaw-plugin.local.json](config/rosclaw-plugin.local.json) as
-   the baseline:
-
-   - `transport.mode = "rosbridge"`
-   - `rosbridge.url = "ws://localhost:9090"`
-   - `robot.namespace = "/k1"`
-
-7. Chat with the OpenClaw agent.
-
-   Example prompts:
-
-   - `Move the Booster K1 forward slowly for one second, then stop.`
-   - `Rotate the K1 to the left in place and stop when finished.`
-   - `List the ROS topics available on the K1 before moving.`
-   - `Check whether the Booster status topic reports simulator passthrough mode.`
-   - `Stop the robot immediately.`
-
-## What The Container Does
-
-On startup the container does this in order:
-
-1. Verifies this example is running in the expected `/k1` namespace.
-2. Prepares any missing K1 motion assets with `prepare_k1_assets.py`.
-3. Launches the Booster K1 Isaac Lab runtime in frozen `motion_replay` mode.
-4. Disables policy loading for the default slide path.
-5. Waits for the Isaac livestream port and the core K1 ROS topics.
-6. Sources the system ROS 2 install and the built ROSClaw overlay.
-7. Launches `ros2 launch rosclaw_bringup rosclaw.launch.py platform:=k1 rosbridge:=true perception:=false use_sim_time:=true`.
-8. Waits for rosbridge and `/k1/booster/status`, then writes a readiness file.
-
-ROSClaw talks to the simulated humanoid through rosbridge on port `9090`. The
-K1 movement path is now a gravity-free `/k1/cmd_vel` slide, not policy-backed
-walking or direct joint teleop.
-
-## Verification
-
-After the container is up, run:
+After cloning, initialize the external repos and apply the local K1 integration
+patches:
 
 ```bash
-./scripts/smoke_ready.sh
-./scripts/smoke_livestream.sh
-./scripts/smoke_rosbridge.sh
-./scripts/smoke_topics.sh
-./scripts/smoke_manifest.sh
-./scripts/smoke_cmd_vel.sh
-./scripts/smoke_motion.sh
-./scripts/probe_stability.sh
+./scripts/setup_external_environment.sh
 ```
 
-The expected sequence is:
+If this checkout already has copied vendor directories from earlier local
+experiments, replace them with submodule-backed symlinks:
 
-1. The readiness file reports `/k1` topics, confirms `motion_replay` mode, and
-   confirms that policy loading is disabled for the default slide path.
-2. Isaac livestream is listening on `:49100`.
-3. rosbridge is reachable on `ws://localhost:9090`.
-4. `/rosclaw/get_manifest` returns the K1 topics and status channel.
-5. A bounded `/k1/cmd_vel` command is accepted by the runtime.
-6. The K1 shows measurable planar motion on `/k1/odom`.
-7. The stability probe can hold the robot at zero command and run a bounded
-   sliding profile without tripping the configured near-fall thresholds.
+```bash
+./scripts/setup_external_environment.sh --force-vendor-links
+```
 
-## Notes
+The setup script does the following:
 
-- Keep `K1_NAMESPACE=k1` for this example. The shipped ROSClaw K1 configs are
-  aligned to the `/k1/*` topic layout.
-- The default example settings are `K1_CONTROL_MODE=motion_replay`,
-  `K1_FREEZE_MOTION=1`, `K1_MOTION_START_FRAME=53`, `K1_TELEOP_DEVICE=cmd_vel`,
-  and `K1_SLIDE_DISABLE_GRAVITY=1`.
-- In that default mode, the K1 does not use `walking_policy_latest.pt` or any
-  other locomotion checkpoint. The readiness file should report blank policy
-  fields.
-- `K1_SDK_COMPAT=0` and `ROSCLAW_K1_SDK_ENABLED=0` are intentional. This is a
-  simulator-path example; ROSClaw uses the ROS topics, not the Booster hardware
-  SDK transport.
-- The default slide path freezes the replay motion on frame `53` of
-  `k1_mj2_seg1.npz`, zeros joint/root replay velocities, and moves the robot by
-  writing the root state each frame from `/k1/cmd_vel`.
-- Gravity is explicitly disabled on the spawned K1 for the default slide path,
-  so the robot stays upright instead of trying to balance.
-- This example does not enable Gemini perception or `/rosclaw/scene` by
-  default. It focuses on simulator bring-up and stable slide motion.
-- The older policy-backed `cmd_vel` path is still available in the repo, but it
-  is no longer the default example behavior.
+- initializes the Booster K1 RL/assets, ROSClaw ROS 2, ROSClaw plugin, and
+  Booster ROS 2 SDK submodules
+- links `isaac-sim-runtime/vendor/booster_assets` and
+  `isaac-sim-runtime/vendor/booster_train` to the Booster K1 RL submodule
+- applies `patches/booster-k1-rl-runtime-overrides.patch` to the Booster K1 RL
+  submodule
+- applies `patches/rosclaw-ros2-k1-bringup.patch` to the ROSClaw ROS 2 submodule
+- applies `patches/rosclaw-plugin-k1-openclaw.patch` to the ROSClaw plugin
+  submodule
+- syncs the patched ROSClaw plugin into
+  `~/.openclaw/extensions/rosclaw` when that default OpenClaw install exists
+
+Those submodule working-tree modifications are intentionally local setup state.
+Do not commit dirty submodule changes; commit changes to the patch files here
+instead.
+
+Use the setup script instead of a blanket recursive submodule update. The
+upstream Booster K1 RL repo currently contains a nested `booster_assets`
+submodule URL that points at a local absolute path; this repo tracks
+`https://github.com/BoosterRobotics/booster_assets` as a top-level submodule to
+make fresh checkouts portable.
+
+## OpenClaw Profile
+
+A default OpenClaw install needs the K1 ROSClaw transport profile before it can
+drive this simulator:
+
+```bash
+./simulators/isaac-sim/scripts/configure_openclaw_k1.sh
+```
+
+That script points the ROSClaw plugin at `ws://127.0.0.1:9090`, sets the robot
+name to `Booster K1`, sets the namespace to `/k1`, installs conservative K1
+safety limits, and leaves unrelated OpenClaw auth/provider settings alone.
+
+To undo the K1 profile and return OpenClaw to a non-K1 configuration:
+
+```bash
+./simulators/isaac-sim/scripts/unconfigure_openclaw_k1.sh
+```
+
+## Isaac Sim
+
+Start the verified WebRTC simulator stack:
+
+```bash
+./simulators/isaac-sim/scripts/run_k1_isaac_sim.sh --mode webrtc
+```
+
+Start with a local Isaac Sim GUI:
+
+```bash
+xhost +local:root
+./simulators/isaac-sim/scripts/run_k1_isaac_sim.sh --mode gui
+```
+
+Stop containers started by the helper:
+
+```bash
+./simulators/isaac-sim/scripts/stop_k1_isaac_sim.sh
+```
+
+The default simulator mode is `K1_CONTROLLER_MODE=kinematic_gait`. It keeps the
+full-body K1 upright, responds to streamed `/k1/cmd_vel`, and publishes odom.
+Dynamic policy mode remains available for checkpoint diagnostics but is not the
+verified default.
+
+## What Not To Commit
+
+The following are local setup/build artifacts and are ignored:
+
+- `isaac-sim-runtime/vendor/booster_assets`
+- `isaac-sim-runtime/vendor/booster_train`
+- `isaac-sim-runtime/logs`
+- `real-hardware/build`
+- `real-hardware/install`
+- `real-hardware/log`
+- local `.pt`, `.pth`, and `.onnx` checkpoint experiments
