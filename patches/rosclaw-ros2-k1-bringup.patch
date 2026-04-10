@@ -1,0 +1,142 @@
+diff --git a/rosclaw_bringup/launch/rosclaw.launch.py b/rosclaw_bringup/launch/rosclaw.launch.py
+index fb4e7c8..e7a674b 100644
+--- a/rosclaw_bringup/launch/rosclaw.launch.py
++++ b/rosclaw_bringup/launch/rosclaw.launch.py
+@@ -4,6 +4,7 @@ Main ROSClaw launch file — brings up all ROSClaw ROS 2 nodes.
+ Usage:
+   # Platform shortcut (loads shipped configs)
+   ros2 launch rosclaw_bringup rosclaw.launch.py platform:=turtlebot3
++  ros2 launch rosclaw_bringup rosclaw.launch.py platform:=k1
+ 
+   # Generic platform (conservative defaults for any robot)
+   ros2 launch rosclaw_bringup rosclaw.launch.py platform:=generic
+@@ -225,7 +226,7 @@ def generate_launch_description() -> LaunchDescription:
+         # --- Platform and config ---
+         DeclareLaunchArgument(
+             "platform", default_value="turtlebot3",
+-            description="Platform name for shipped configs: turtlebot3, go2, g1, generic",
++            description="Platform name for shipped configs: turtlebot3, sim_turtlebot3, go2, g1, k1, generic",
+         ),
+         DeclareLaunchArgument(
+             "safety_config", default_value="",
+diff --git a/tests/test_bringup_launch.py b/tests/test_bringup_launch.py
+index e06a374..13c324d 100644
+--- a/tests/test_bringup_launch.py
++++ b/tests/test_bringup_launch.py
+@@ -132,3 +132,26 @@ def test_standalone_launches_declare_robot_namespace():
+         contents = launch_path.read_text()
+         assert '"robot_namespace"' in contents
+         assert "namespace=robot_ns or None" in contents
++
++
++def test_k1_launch_wrapper_targets_k1_platform():
++    launch_path = (
++        Path(__file__).resolve().parents[1]
++        / "rosclaw_bringup"
++        / "launch"
++        / "k1.launch.py"
++    )
++    contents = launch_path.read_text()
++    assert 'launch_arguments={"platform": "k1"}' in contents
++
++
++def test_k1_platform_configs_use_relative_topics():
++    repo_root = Path(__file__).resolve().parents[1] / "rosclaw_bringup" / "config" / "k1"
++
++    for config_path in [
++        repo_root / "discovery.yaml",
++        repo_root / "perception.yaml",
++        repo_root / "safety_policy.yaml",
++    ]:
++        contents = config_path.read_text()
++        assert "/k1/" not in contents
+diff --git a/rosclaw_bringup/config/k1/discovery.yaml b/rosclaw_bringup/config/k1/discovery.yaml
+new file mode 100644
+index 0000000..d33e7bf
+--- /dev/null
++++ b/rosclaw_bringup/config/k1/discovery.yaml
+@@ -0,0 +1,12 @@
++# ROSClaw discovery config — Booster K1
++
++/**:
++  ros__parameters:
++    robot_name: "Booster K1"
++    robot_namespace: ""
++    publish_interval: 2.0
++    exclude_prefixes:
++      - "/rosout"
++      - "/parameter_events"
++      - "rosclaw/manifest"
++      - "rosclaw/get_manifest"
+diff --git a/rosclaw_bringup/config/k1/perception.yaml b/rosclaw_bringup/config/k1/perception.yaml
+new file mode 100644
+index 0000000..d24e704
+--- /dev/null
++++ b/rosclaw_bringup/config/k1/perception.yaml
+@@ -0,0 +1,12 @@
++# ROSClaw perception config — Booster K1 Isaac Sim
++# The K1 simulator relays the Isaac Sim RGB camera to image_transport compressed.
++
++/**:
++  ros__parameters:
++    camera_topic: "front_cam/rgb/compressed"
++    frame_rate: 1.0
++    gemini_model: "gemini-2.5-flash"
++    api_key_env: "GEMINI_API_KEY"
++    inference_timeout: 20.0
++    max_retries: 2
++    empty_cycles_before_refresh: 4
+diff --git a/rosclaw_bringup/config/k1/safety_policy.yaml b/rosclaw_bringup/config/k1/safety_policy.yaml
+new file mode 100644
+index 0000000..1e0e705
+--- /dev/null
++++ b/rosclaw_bringup/config/k1/safety_policy.yaml
+@@ -0,0 +1,22 @@
++# ROSClaw safety policy — Booster K1
++# Humanoid robot in Isaac Sim. Keep limits conservative and namespace-safe.
++
++/**:
++  ros__parameters:
++    linear_max: 1.2
++    angular_max: 1.75
++    cmd_vel_topic: "cmd_vel"
++    estop_rate: 10.0
++    allowlisted_topics:
++      - "cmd_vel"
++      - "odom"
++      - "imu"
++      - "joint_states"
++      - "front_cam/rgb/compressed"
++      - "front_cam/camera_info"
++      - "clock"
++      - "tf"
++      - "tf_static"
++      - "navigate_to_pose"
++      - "low_state"
++      - "odometer"
+diff --git a/rosclaw_bringup/launch/k1.launch.py b/rosclaw_bringup/launch/k1.launch.py
+new file mode 100644
+index 0000000..e4072e8
+--- /dev/null
++++ b/rosclaw_bringup/launch/k1.launch.py
+@@ -0,0 +1,20 @@
++"""Convenience launch: ROSClaw for Booster K1."""
++
++from launch import LaunchDescription
++from launch.actions import IncludeLaunchDescription
++from launch.launch_description_sources import PythonLaunchDescriptionSource
++from ament_index_python.packages import get_package_share_directory
++
++import os
++
++
++def generate_launch_description() -> LaunchDescription:
++    pkg_share = get_package_share_directory("rosclaw_bringup")
++    return LaunchDescription([
++        IncludeLaunchDescription(
++            PythonLaunchDescriptionSource(
++                os.path.join(pkg_share, "launch", "rosclaw.launch.py")
++            ),
++            launch_arguments={"platform": "k1"}.items(),
++        ),
++    ])

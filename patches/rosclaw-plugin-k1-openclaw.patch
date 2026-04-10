@@ -1,0 +1,437 @@
+diff --git a/README.md b/README.md
+index 051ba2b..81cb18a 100644
+--- a/README.md
++++ b/README.md
+@@ -166,10 +166,11 @@ and a `timestamp` (Unix epoch seconds) so the plugin can detect stale data.
+ 
+ ## What the Plugin Provides
+ 
+-### AI Tools (8)
++### AI Tools (9)
+ 
+ | Tool | Description |
+ |------|-------------|
++| `ros2_cmd_vel` | Stream `geometry_msgs/msg/Twist` commands for bounded direct movement |
+ | `ros2_publish` | Publish a message to a ROS2 topic |
+ | `ros2_subscribe_once` | Subscribe to a topic and return one message |
+ | `ros2_service_call` | Call a ROS2 service |
+@@ -193,8 +194,8 @@ and a `timestamp` (Unix epoch seconds) so the plugin can detect stale data.
+   description from `/rosclaw/scene`, and injects all of it into the agent's
+   system prompt. Caches the manifest for 60s; clears on transport reconnect.
+ - **`before_tool_call`** — Validates all tool calls against safety constraints:
+-  - **Velocity limits** on `ros2_publish` (Twist messages) — blocks if linear or
+-    angular speed exceeds the current safety limits
++  - **Velocity limits** on `ros2_cmd_vel` and `ros2_publish` Twist messages —
++    blocks if linear or angular speed exceeds the current safety limits
+   - **Workspace bounds** on `ros2_action_goal` (navigation goals) — blocks if
+     the target position is outside the configured workspace
+   - **Protected nodes** on `ros2_param_set` — blocks parameter changes to
+@@ -204,9 +205,10 @@ and a `timestamp` (Unix epoch seconds) so the plugin can detect stale data.
+     `/rosclaw/set_safety_policy` and all parameter server endpoints (the agent
+     must use `ros2_param_get`/`ros2_param_set` tools instead)
+ 
+-### Skills (4)
++### Skills (5)
+ 
+ - **check-status** — Read battery, position, diagnostics, and sensor status
++- **drive-by-velocity** — Move or turn by streaming Twist commands on cmd_vel
+ - **navigate-to** — Navigate the robot to a location using Nav2
+ - **take-photo** — Capture a camera frame
+ - **pick-object** — Pick up or manipulate an object using MoveIt2
+diff --git a/openclaw.plugin.json b/openclaw.plugin.json
+index ef4ec5f..07ec2af 100644
+--- a/openclaw.plugin.json
++++ b/openclaw.plugin.json
+@@ -3,7 +3,13 @@
+   "name": "RosClaw",
+   "version": "0.0.1",
+   "description": "Control ROS2 robots through natural language via messaging apps",
+-  "skills": ["check-status", "navigate-to", "take-photo", "pick-object"],
++  "skills": [
++    "skills/check-status",
++    "skills/drive-by-velocity",
++    "skills/navigate-to",
++    "skills/take-photo",
++    "skills/pick-object"
++  ],
+   "configSchema": {
+     "type": "object",
+     "additionalProperties": false,
+diff --git a/src/discovery/robot-context.ts b/src/discovery/robot-context.ts
+index a2e3757..40d3767 100644
+--- a/src/discovery/robot-context.ts
++++ b/src/discovery/robot-context.ts
+@@ -164,6 +164,12 @@ export function buildRobotContext(
+ ): string {
+   const { robotName, topics, services, actions } = manifest;
+   const name = robotName || "Robot";
++  const cmdVelTopics = topics.filter(
++    (t) => t.type === "geometry_msgs/msg/Twist" && t.name.endsWith("/cmd_vel"),
++  );
++  const odomTopics = topics.filter(
++    (t) => t.type === "nav_msgs/msg/Odometry" && t.name.endsWith("/odom"),
++  );
+ 
+   let context = `## Robot: ${name}\n\n`;
+   context += `You are connected to a ROS2 robot named "${name}". You can control it using the ros2_* tools.\n\n`;
+@@ -204,9 +210,24 @@ export function buildRobotContext(
+ 
+ `;
+ 
++  if (cmdVelTopics.length > 0) {
++    const topicList = cmdVelTopics.map((t) => `\`${t.name}\``).join(", ");
++    const odomList = odomTopics.length > 0
++      ? odomTopics.map((t) => `\`${t.name}\``).join(", ")
++      : "`/odom` or the namespaced odometry topic";
++    context += `### Velocity Control
++- Use \`ros2_cmd_vel\` for direct velocity movement requests. Do not use a single \`ros2_publish\` Twist for movement.
++- Command topic${cmdVelTopics.length === 1 ? "" : "s"}: ${topicList}.
++- Publish a sustained stream for the requested duration, then stop. Example: to move about 3 ft at 0.3 m/s, send \`linear_x=0.3\` for about 3.1 seconds.
++- Verify actual motion by reading odometry from ${odomList} before and after the command.
++
++`;
++  }
++
+   context += `### Tips
+ - Use \`ros2_list_topics\` to discover all available topics
+ - Use \`ros2_subscribe_once\` to read the current value of any topic
++- Use \`ros2_cmd_vel\` for short direct movement or turn commands
+ - Use \`ros2_action_goal\` for long-running operations like navigation
+ - Use \`ros2_camera_snapshot\` to see what the robot sees
+ - The user can say /estop at any time to immediately stop the robot`;
+diff --git a/src/index.ts b/src/index.ts
+index ac78125..8307bb0 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -23,7 +23,7 @@ export default {
+     registerService(api, config);
+ 
+     // Register all ROS2 tools with the AI agent
+-    registerTools(api);
++    registerTools(api, config);
+ 
+     // Register safety validation hook (before_tool_call)
+     registerSafetyHook(api, config);
+diff --git a/src/safety/validator.ts b/src/safety/validator.ts
+index 2b4a0c6..79ea31d 100644
+--- a/src/safety/validator.ts
++++ b/src/safety/validator.ts
+@@ -40,6 +40,11 @@ export function registerSafetyHook(api: OpenClawPluginApi, config: RosClawConfig
+       if (result) return result;
+     }
+ 
++    if (event.toolName === "ros2_cmd_vel") {
++      const result = validateCmdVel(event.params, safety);
++      if (result) return result;
++    }
++
+     // Validate workspace limits on ros2_action_goal (navigation goals)
+     if (event.toolName === "ros2_action_goal") {
+       const result = validateActionGoal(event.params, safety, api);
+@@ -102,6 +107,48 @@ export function validatePublish(
+   }
+ }
+ 
++/**
++ * Validate sustained velocity command parameters.
++ */
++export function validateCmdVel(
++  params: Record<string, unknown>,
++  safety: SafetyLimits,
++): { block: boolean; blockReason: string } | undefined {
++  const linearX = numberParam(params, "linear_x");
++  const linearY = numberParam(params, "linear_y");
++  const angularZ = numberParam(params, "angular_z");
++  const durationSeconds = numberParam(params, "duration_seconds");
++
++  const speed = Math.sqrt(linearX ** 2 + linearY ** 2);
++  if (speed > safety.maxLinearVelocity) {
++    return {
++      block: true,
++      blockReason: `Linear velocity ${speed.toFixed(2)} m/s exceeds safety limit of ${safety.maxLinearVelocity} m/s`,
++    };
++  }
++
++  if (Math.abs(angularZ) > safety.maxAngularVelocity) {
++    return {
++      block: true,
++      blockReason: `Angular velocity ${Math.abs(angularZ).toFixed(2)} rad/s exceeds safety limit of ${safety.maxAngularVelocity} rad/s`,
++    };
++  }
++
++  if (durationSeconds > 30) {
++    return {
++      block: true,
++      blockReason: "Velocity command duration exceeds the 30 second safety limit",
++    };
++  }
++}
++
++function numberParam(params: Record<string, unknown>, key: string): number {
++  const raw = params[key];
++  if (raw === undefined || raw === null) return 0;
++  const value = Number(raw);
++  return Number.isFinite(value) ? value : 0;
++}
++
+ /**
+  * Validate workspace limits for navigation action goals.
+  */
+diff --git a/src/tools/index.ts b/src/tools/index.ts
+index 5fd9ef5..093a1ea 100644
+--- a/src/tools/index.ts
++++ b/src/tools/index.ts
+@@ -1,4 +1,6 @@
+ import type { OpenClawPluginApi } from "../plugin-api.js";
++import type { RosClawConfig } from "../config.js";
++import { registerCmdVelTool } from "./ros2-cmd-vel.js";
+ import { registerPublishTool } from "./ros2-publish.js";
+ import { registerSubscribeTool } from "./ros2-subscribe.js";
+ import { registerServiceTool } from "./ros2-service.js";
+@@ -10,7 +12,8 @@ import { registerCameraTool } from "./ros2-camera.js";
+ /**
+  * Register all ROS2 tools with the OpenClaw AI agent.
+  */
+-export function registerTools(api: OpenClawPluginApi): void {
++export function registerTools(api: OpenClawPluginApi, config: RosClawConfig): void {
++  registerCmdVelTool(api, config);
+   registerPublishTool(api);
+   registerSubscribeTool(api);
+   registerServiceTool(api);
+diff --git a/test/plugin.test.mjs b/test/plugin.test.mjs
+index 59284e7..2abec01 100644
+--- a/test/plugin.test.mjs
++++ b/test/plugin.test.mjs
+@@ -28,6 +28,7 @@ import {
+ } from "../dist/safety/limits.js";
+ import {
+   validateActionGoal,
++  validateCmdVel,
+   validatePublish,
+   validateParamSet,
+   validateServiceCall,
+@@ -122,6 +123,20 @@ test("validatePublish blocks unsafe linear and angular velocities", () => {
+ });
+ 
+ 
++test("validateCmdVel blocks unsafe sustained velocity commands", () => {
++  const safety = {
++    maxLinearVelocity: 1,
++    maxAngularVelocity: 1,
++    workspaceLimits: { xMin: -1, xMax: 1, yMin: -1, yMax: 1 },
++  };
++
++  assert.equal(validateCmdVel({ linear_x: 2 }, safety)?.block, true);
++  assert.equal(validateCmdVel({ angular_z: 2 }, safety)?.block, true);
++  assert.equal(validateCmdVel({ duration_seconds: 31 }, safety)?.block, true);
++  assert.equal(validateCmdVel({ linear_x: 0.5, duration_seconds: 3 }, safety), undefined);
++});
++
++
+ test("validateActionGoal blocks out-of-bounds goals", () => {
+   const logger = createLogger();
+   const api = { logger };
+@@ -228,6 +243,8 @@ test("buildRobotContext renders available resources and safety limits", () => {
+   assert.match(context, /## Robot: Scout/);
+   assert.match(context, /### Current Scene/);
+   assert.match(context, /### Available Topics/);
++  assert.match(context, /### Velocity Control/);
++  assert.match(context, /Use `ros2_cmd_vel`/);
+   assert.match(context, /Maximum linear velocity: 1.5 m\/s/);
+ });
+ 
+diff --git a/skills/drive-by-velocity/SKILL.md b/skills/drive-by-velocity/SKILL.md
+new file mode 100644
+index 0000000..6a11f04
+--- /dev/null
++++ b/skills/drive-by-velocity/SKILL.md
+@@ -0,0 +1,41 @@
++---
++name: drive-by-velocity
++description: Move or turn a ROS2 robot by streaming Twist commands on cmd_vel for a bounded duration.
++---
++
++# Drive By Velocity
++
++## When to Use
++
++Use this skill when the user asks for direct motion such as:
++- "Move forward 3 feet"
++- "Back up 2 feet"
++- "Turn left slowly"
++- "Stop the robot"
++
++## Steps
++
++1. Read odometry before movement with `ros2_subscribe_once` on the robot's odom topic, usually `/odom` or a namespaced topic such as `/k1/odom`.
++2. Use `ros2_cmd_vel` for the requested bounded motion. Do not use a single `ros2_publish` Twist for movement; velocity controllers expect a repeated command stream.
++3. Use the namespaced command topic from the robot context, such as `/k1/cmd_vel`.
++4. For distance requests, convert feet to meters and choose a conservative speed. Example: 3 feet is about 0.91 m, so `linear_x=0.3` for about 3.1 seconds.
++5. Read odometry again after the command and report the measured displacement.
++
++## Example: Move Forward 3 Feet
++
++```
++Tool: ros2_cmd_vel
++Topic: /k1/cmd_vel
++linear_x: 0.3
++linear_y: 0.0
++angular_z: 0.0
++duration_seconds: 3.1
++rate_hz: 10
++stop_at_end: true
++```
++
++## Safety Notes
++
++- Stay within the configured safety limits for linear and angular velocity.
++- Always use `stop_at_end: true` unless the user explicitly asks to keep driving.
++- If odometry does not change, state that the command was sent but motion was not verified.
+diff --git a/src/tools/ros2-cmd-vel.ts b/src/tools/ros2-cmd-vel.ts
+new file mode 100644
+index 0000000..cc609a6
+--- /dev/null
++++ b/src/tools/ros2-cmd-vel.ts
+@@ -0,0 +1,142 @@
++import { Type } from "@sinclair/typebox";
++import type { OpenClawPluginApi } from "../plugin-api.js";
++import type { RosClawConfig } from "../config.js";
++import { getTransport } from "../service.js";
++
++const TWIST_TYPE = "geometry_msgs/msg/Twist";
++const DEFAULT_RATE_HZ = 10;
++const MIN_RATE_HZ = 2;
++const MAX_RATE_HZ = 30;
++const MAX_DURATION_SECONDS = 30;
++
++function defaultCmdVelTopic(namespace: string): string {
++  const trimmed = namespace.trim().replace(/\/+$/, "");
++  if (!trimmed || trimmed === "/") return "/cmd_vel";
++  return `${trimmed.startsWith("/") ? trimmed : `/${trimmed}`}/cmd_vel`;
++}
++
++function finiteParam(params: Record<string, unknown>, key: string, fallback: number): number {
++  const raw = params[key];
++  const value = raw === undefined ? fallback : Number(raw);
++  if (!Number.isFinite(value)) {
++    throw new Error(`${key} must be a finite number`);
++  }
++  return value;
++}
++
++function sleep(ms: number, signal?: AbortSignal): Promise<void> {
++  if (!signal) {
++    return new Promise((resolve) => setTimeout(resolve, ms));
++  }
++  if (signal.aborted) {
++    return Promise.reject(new Error("ros2_cmd_vel aborted"));
++  }
++
++  return new Promise((resolve, reject) => {
++    const timer = setTimeout(() => {
++      signal.removeEventListener("abort", abort);
++      resolve();
++    }, ms);
++    const abort = () => {
++      clearTimeout(timer);
++      reject(new Error("ros2_cmd_vel aborted"));
++    };
++    signal.addEventListener("abort", abort, { once: true });
++  });
++}
++
++function twist(linearX: number, linearY: number, angularZ: number): Record<string, unknown> {
++  return {
++    linear: { x: linearX, y: linearY, z: 0 },
++    angular: { x: 0, y: 0, z: angularZ },
++  };
++}
++
++/**
++ * Register a sustained velocity-command tool.
++ *
++ * One-shot Twist publishes are easy for an agent to misuse: most mobile bases
++ * and simulated controllers expect a command stream, not a single packet.
++ */
++export function registerCmdVelTool(api: OpenClawPluginApi, config: RosClawConfig): void {
++  api.registerTool({
++    name: "ros2_cmd_vel",
++    label: "ROS2 Velocity Command",
++    description:
++      "Send a sustained geometry_msgs/msg/Twist velocity stream to move the robot. " +
++      "Use this instead of a one-shot ros2_publish for requests like moving forward, backward, turning, or stopping.",
++    parameters: Type.Object({
++      topic: Type.Optional(Type.String({
++        description: `Velocity command topic. Defaults to ${defaultCmdVelTopic(config.robot.namespace)}.`,
++      })),
++      linear_x: Type.Optional(Type.Number({ description: "Forward velocity in m/s. Negative moves backward." })),
++      linear_y: Type.Optional(Type.Number({ description: "Sideways velocity in m/s, if supported." })),
++      angular_z: Type.Optional(Type.Number({ description: "Yaw rate in rad/s. Positive turns left." })),
++      duration_seconds: Type.Number({
++        minimum: 0,
++        maximum: MAX_DURATION_SECONDS,
++        description: "How long to stream the command. Use 2-10 seconds for short smoke tests.",
++      }),
++      rate_hz: Type.Optional(Type.Number({
++        minimum: MIN_RATE_HZ,
++        maximum: MAX_RATE_HZ,
++        description: `Command stream rate. Defaults to ${DEFAULT_RATE_HZ} Hz.`,
++      })),
++      stop_at_end: Type.Optional(Type.Boolean({
++        description: "Publish a zero Twist when the duration ends. Defaults to true.",
++      })),
++    }),
++
++    async execute(_toolCallId, params, signal) {
++      const topic = (params["topic"] as string | undefined) ?? defaultCmdVelTopic(config.robot.namespace);
++      const linearX = finiteParam(params, "linear_x", 0);
++      const linearY = finiteParam(params, "linear_y", 0);
++      const angularZ = finiteParam(params, "angular_z", 0);
++      const durationSeconds = finiteParam(params, "duration_seconds", 0);
++      const requestedRateHz = finiteParam(params, "rate_hz", DEFAULT_RATE_HZ);
++      const rateHz = Math.min(MAX_RATE_HZ, Math.max(MIN_RATE_HZ, requestedRateHz));
++      const stopAtEnd = (params["stop_at_end"] as boolean | undefined) ?? true;
++      const intervalMs = Math.max(1, Math.round(1000 / rateHz));
++      const transport = getTransport();
++      const command = twist(linearX, linearY, angularZ);
++      const startedAt = Date.now();
++      const deadline = startedAt + Math.max(0, durationSeconds * 1000);
++      let publishes = 0;
++
++      do {
++        if (signal?.aborted) throw new Error("ros2_cmd_vel aborted");
++        transport.publish({ topic, type: TWIST_TYPE, msg: command });
++        publishes += 1;
++        const remainingMs = deadline - Date.now();
++        if (remainingMs <= 0) break;
++        await sleep(Math.min(intervalMs, remainingMs), signal);
++      } while (Date.now() < deadline);
++
++      if (stopAtEnd) {
++        const stop = twist(0, 0, 0);
++        for (let i = 0; i < 3; i += 1) {
++          transport.publish({ topic, type: TWIST_TYPE, msg: stop });
++          await sleep(50, signal);
++        }
++      }
++
++      const result = {
++        success: true,
++        topic,
++        type: TWIST_TYPE,
++        linear_x: linearX,
++        linear_y: linearY,
++        angular_z: angularZ,
++        duration_seconds: durationSeconds,
++        rate_hz: rateHz,
++        publishes,
++        stop_at_end: stopAtEnd,
++      };
++
++      return {
++        content: [{ type: "text", text: JSON.stringify(result) }],
++        details: result,
++      };
++    },
++  });
++}

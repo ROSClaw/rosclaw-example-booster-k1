@@ -1,16 +1,33 @@
-.env
+simulators/isaac-sim/.docker/
+simulators/isaac-sim/.env
 .docker/
+.env
 __pycache__/
 *.pyc
-checkpoints/*.pt
-checkpoints/*.onnx
-checkpoints/*.jit
+*.pyo
+*.swp
+*.swo
+
+# Local generated simulator/runtime state.
+isaac-sim-runtime/logs/
+isaac-sim-runtime/vendor/booster_assets/
+isaac-sim-runtime/vendor/booster_train/
+
+# Local ROS 2 build products.
 real-hardware/ws/
-real-hardware/generated/*.env
-real-hardware/generated/*.xml
-real-hardware/generated/*.log
 real-hardware/build/
 real-hardware/install/
 real-hardware/log/
+real-hardware/generated/*.env
+real-hardware/generated/*.xml
+real-hardware/generated/*.log
 real-hardware/dds-profile.fixed.xml
 real-hardware/dds-profile.host.xml
+
+# Local policy/checkpoint experiments.
+checkpoints/*.pt
+checkpoints/*.onnx
+checkpoints/*.jit
+*.pt
+*.pth
+*.onnx

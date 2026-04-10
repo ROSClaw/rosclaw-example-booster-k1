@@ -1,0 +1,705 @@
+diff --git a/source/booster_train/booster_train/assets/robots/booster.py b/source/booster_train/booster_train/assets/robots/booster.py
+index e14ea53..940e7ce 100644
+--- a/source/booster_train/booster_train/assets/robots/booster.py
++++ b/source/booster_train/booster_train/assets/robots/booster.py
+@@ -219,8 +219,6 @@ for a in BOOSTER_K1_CFG.actuators.values():
+         if n in e and n in s and s[n]:
+             K1_ACTION_SCALE[n] = 0.25 * e[n] / s[n]
+ 
+-# The locomotion task only actuates the lower body, but it still derives the scale
+-# from the full K1 robot config so the training task and demo runtime stay consistent.
+ K1_LOCOMOTION_ACTION_SCALE = {
+     key: value
+     for key, value in K1_ACTION_SCALE.items()
+diff --git a/source/booster_train/booster_train/demo/control.py b/source/booster_train/booster_train/demo/control.py
+index 0996231..44338b6 100644
+--- a/source/booster_train/booster_train/demo/control.py
++++ b/source/booster_train/booster_train/demo/control.py
+@@ -102,8 +102,6 @@ class CmdVelSubNode:
+         if self.stale_timeout_sec <= 0.0:
+             return
+ 
+-        # Clear commands that have stopped updating so the robot naturally returns
+-        # to a zero-velocity target instead of walking indefinitely on stale input.
+         now = time.monotonic()
+         stale_robot_indices: list[int] = []
+         with self._state_lock:
+@@ -154,9 +152,6 @@ class _CmdVelTeleopSource(TeleopSource):
+         keys = og.Controller.Keys
+         for robot_index in settings.iter_robot_indices():
+             graph_path = settings.graph_path("K1CmdVelTeleop", robot_index)
+-            # When teleop is sourced from ROS inside the running simulator, use an
+-            # OmniGraph subscriber so Isaac Sim keeps the ROS callback path aligned
+-            # with the simulation tick rather than a separate Python spin thread.
+             og.Controller.edit(
+                 {
+                     "graph_path": graph_path,
+@@ -354,8 +349,6 @@ class CmdVelControllerRuntime(ControllerRuntime):
+             self.teleop_source.update_command_buffer(self.command_buffer)
+ 
+         if self.policy is not None:
+-            # The command buffer influences observations through the environment's
+-            # external-command path; the policy still outputs joint-space actions.
+             policy_obs = obs["policy"] if isinstance(obs, dict) else obs
+             with torch.inference_mode():
+                 return self.policy(policy_obs)
+diff --git a/source/booster_train/booster_train/demo/gr00t_backend.py b/source/booster_train/booster_train/demo/gr00t_backend.py
+new file mode 100644
+index 0000000..36390e5
+--- /dev/null
++++ b/source/booster_train/booster_train/demo/gr00t_backend.py
+@@ -0,0 +1,150 @@
++from __future__ import annotations
++
++from dataclasses import dataclass
++import os
++from pathlib import Path
++import sys
++
++from booster_train.demo.control import CmdVelControllerRuntime
++
++
++@dataclass(frozen=True)
++class Gr00tBackendStatus:
++    requested_root: str
++    repo_root: str | None
++    active: bool
++    fallback_backend: str
++    reason: str
++
++
++def _resolve_gr00t_root(explicit_root: str | None = None) -> Path | None:
++    root = explicit_root or os.environ.get("GR00T_WBC_ROOT", "")
++    if not root:
++        return None
++    path = Path(root).expanduser().resolve()
++    if not path.exists():
++        return None
++    return path
++
++
++def _inject_repo_root(repo_root: Path) -> None:
++    repo_str = str(repo_root)
++    if repo_str not in sys.path:
++        sys.path.insert(0, repo_str)
++
++
++def _validate_repo(repo_root: Path) -> tuple[bool, str]:
++    expected = [
++        repo_root / "README.md",
++        repo_root / "decoupled_wbc" / "control" / "policy" / "wbc_policy_factory.py",
++        repo_root / "decoupled_wbc" / "control" / "robot_model" / "instantiation" / "g1.py",
++    ]
++    missing = [path for path in expected if not path.exists()]
++    if missing:
++        joined = ", ".join(str(path.relative_to(repo_root)) for path in missing)
++        return False, f"missing expected GR00T files: {joined}"
++
++    _inject_repo_root(repo_root)
++    try:
++        from decoupled_wbc.control.policy import wbc_policy_factory
++        from decoupled_wbc.control.robot_model.instantiation import g1
++    except Exception as exc:
++        return False, f"unable to import GR00T Python modules: {exc}"
++
++    if "g1" not in getattr(wbc_policy_factory, "get_wbc_policy").__code__.co_consts:
++        return False, "GR00T policy factory no longer exposes the expected g1-only entrypoint"
++    if not hasattr(g1, "instantiate_g1_robot_model"):
++        return False, "GR00T robot-model package is missing instantiate_g1_robot_model"
++    return True, "validated"
++
++
++def build_status(explicit_root: str | None = None) -> Gr00tBackendStatus:
++    repo_root = _resolve_gr00t_root(explicit_root)
++    requested_root = explicit_root or os.environ.get("GR00T_WBC_ROOT", "")
++    if repo_root is None:
++        return Gr00tBackendStatus(
++            requested_root=requested_root,
++            repo_root=None,
++            active=False,
++            fallback_backend="vendor_cmd_vel",
++            reason="GR00T repo not found; set --gr00t-root or GR00T_WBC_ROOT",
++        )
++
++    valid, detail = _validate_repo(repo_root)
++    if not valid:
++        return Gr00tBackendStatus(
++            requested_root=requested_root,
++            repo_root=str(repo_root),
++            active=False,
++            fallback_backend="vendor_cmd_vel",
++            reason=detail,
++        )
++
++    # The public GR00T Python stack still hard-codes G1 robot instantiation and policy routing.
++    return Gr00tBackendStatus(
++        requested_root=requested_root,
++        repo_root=str(repo_root),
++        active=False,
++        fallback_backend="vendor_cmd_vel",
++        reason=(
++            "GR00T repo is available, but the shipped Python controller remains G1-specific "
++            "and is not safe to activate on Booster K1 without a dedicated K1 robot-model and "
++            "observation/action adapter"
++        ),
++    )
++
++
++class Gr00tWbcControllerRuntime:
++    """Wrapper that reserves the GR00T backend name while falling back safely."""
++
++    def __init__(self, fallback_runtime: CmdVelControllerRuntime, status: Gr00tBackendStatus):
++        self._fallback_runtime = fallback_runtime
++        self._status = status
++        self._reported = False
++
++    def _report(self):
++        if self._reported:
++            return
++        root_msg = self._status.repo_root or self._status.requested_root or "<unset>"
++        print(
++            "[gr00t] requested controller-backend=gr00t_wbc, "
++            f"repo_root={root_msg}, active={self._status.active}. {self._status.reason}. "
++            f"Falling back to {self._status.fallback_backend}.",
++            flush=True,
++        )
++        self._reported = True
++
++    def start(self):
++        self._report()
++        self._fallback_runtime.start()
++
++    def next_action(self, obs):
++        self._report()
++        return self._fallback_runtime.next_action(obs)
++
++    def shutdown(self):
++        self._fallback_runtime.shutdown()
++
++
++def create_gr00t_controller_runtime(
++    settings,
++    command_buffer,
++    action_dim: int,
++    device,
++    *,
++    fallback_policy=None,
++    gr00t_root: str | None = None,
++    strict: bool = False,
++):
++    status = build_status(gr00t_root)
++    if strict and not status.active:
++        raise RuntimeError(status.reason)
++
++    fallback_runtime = CmdVelControllerRuntime(
++        settings,
++        command_buffer,
++        action_dim,
++        device,
++        policy=fallback_policy,
++    )
++    return Gr00tWbcControllerRuntime(fallback_runtime, status)
+diff --git a/source/booster_train/booster_train/demo/image_transport.py b/source/booster_train/booster_train/demo/image_transport.py
+new file mode 100644
+index 0000000..339266a
+--- /dev/null
++++ b/source/booster_train/booster_train/demo/image_transport.py
+@@ -0,0 +1,98 @@
++from __future__ import annotations
++
++import threading
++
++from booster_train.demo.ros_bridge import SpinNode
++from booster_train.demo.runtime import RuntimeSettings
++
++
++class K1CompressedCameraRelay(SpinNode):
++    """Republish Isaac Sim raw camera images as compressed ROS topics."""
++
++    def __init__(self, settings: RuntimeSettings, jpeg_quality: int = 80):
++        super().__init__(settings.node_name("k1_camera_compressor"))
++        self._settings = settings
++        self._jpeg_quality = int(max(1, min(jpeg_quality, 100)))
++        self._publishers = []
++        self._warned_encodings: set[str] = set()
++        self._warned_missing_cv = False
++        self._lock = threading.Lock()
++
++        from sensor_msgs.msg import CompressedImage, Image
++
++        self._compressed_cls = CompressedImage
++        self._subscriptions = []
++        for robot_index in settings.iter_robot_indices():
++            self._publishers.append(
++                self.create_publisher(
++                    CompressedImage,
++                    settings.topic("front_cam/rgb/compressed", robot_index),
++                    10,
++                )
++            )
++            self._subscriptions.append(
++                self.create_subscription(
++                    Image,
++                    settings.topic("front_cam/rgb", robot_index),
++                    lambda msg, idx=robot_index: self._image_cb(msg, idx),
++                    10,
++                )
++            )
++
++    def _image_cb(self, msg, robot_index: int):
++        try:
++            import cv2
++            import numpy as np
++        except Exception as exc:
++            with self._lock:
++                if not self._warned_missing_cv:
++                    self.get_logger().warning(
++                        f"camera compression disabled because OpenCV is unavailable: {exc}"
++                    )
++                    self._warned_missing_cv = True
++            return
++
++        channels = {
++            "rgb8": 3,
++            "bgr8": 3,
++            "rgba8": 4,
++            "bgra8": 4,
++        }.get(msg.encoding)
++        if channels is None:
++            with self._lock:
++                if msg.encoding not in self._warned_encodings:
++                    self.get_logger().warning(
++                        f"unsupported camera encoding '{msg.encoding}', skipping compression"
++                    )
++                    self._warned_encodings.add(msg.encoding)
++            return
++
++        image = np.frombuffer(msg.data, dtype=np.uint8)
++        if image.size != msg.height * msg.width * channels:
++            self.get_logger().warning(
++                "camera image size does not match height/width/encoding, skipping compression"
++            )
++            return
++
++        image = image.reshape((msg.height, msg.width, channels))
++        if msg.encoding == "rgb8":
++            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
++        elif msg.encoding == "rgba8":
++            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
++        elif msg.encoding == "bgra8":
++            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
++
++        success, encoded = cv2.imencode(
++            ".jpg",
++            image,
++            [int(cv2.IMWRITE_JPEG_QUALITY), self._jpeg_quality],
++        )
++        if not success:
++            self.get_logger().warning("failed to JPEG-encode camera image")
++            return
++
++        out = self._compressed_cls()
++        out.header = msg.header
++        out.format = "jpeg"
++        out.data = encoded.tobytes()
++        self._publishers[robot_index].publish(out)
+diff --git a/source/booster_train/booster_train/demo/ros_bridge.py b/source/booster_train/booster_train/demo/ros_bridge.py
+index 3dbd93e..af230aa 100644
+--- a/source/booster_train/booster_train/demo/ros_bridge.py
++++ b/source/booster_train/booster_train/demo/ros_bridge.py
+@@ -5,11 +5,10 @@ import threading
+ from geometry_msgs.msg import TransformStamped
+ from nav_msgs.msg import Odometry
+ from rclpy.node import Node
+-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile
+ from rosgraph_msgs.msg import Clock
+ from sensor_msgs.msg import Imu, JointState
+ from std_msgs.msg import Header
+-from tf2_msgs.msg import TFMessage
++from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+ import torch
+ 
+ from booster_train.demo.camera import FRONT_CAMERA_POS
+@@ -23,25 +22,12 @@ class K1RosStatePublisher(Node):
+         super().__init__(settings.node_name("k1_ros_state_pub"))
+ 
+         self.settings = settings
+-        # `/clock`, `/tf`, and `/tf_static` are global ROS topics by convention.
+-        # Keep the robot-specific streams namespaced while publishing a single
+-        # simulation clock and transform tree for the full runtime.
+-        self.clock_pub = self.create_publisher(Clock, "/clock", 10)
++        self.clock_pub = self.create_publisher(Clock, settings.topic("clock"), 10)
+         self.joint_state_pubs = []
+         self.odom_pubs = []
+         self.imu_pubs = []
+         self._prev_body_lin_vel_b: dict[int, torch.Tensor] = {}
+         self._prev_sim_time_sec: dict[int, float] = {}
+-        self.tf_pub = self.create_publisher(TFMessage, "/tf", 10)
+-        self.tf_static_pub = self.create_publisher(
+-            TFMessage,
+-            "/tf_static",
+-            QoSProfile(
+-                history=QoSHistoryPolicy.KEEP_LAST,
+-                depth=1,
+-                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+-            ),
+-        )
+ 
+         for robot_index in settings.iter_robot_indices():
+             self.joint_state_pubs.append(
+@@ -55,6 +41,8 @@ class K1RosStatePublisher(Node):
+             )
+ 
+         self.clock_msg = None
++        self.tf_broadcaster = TransformBroadcaster(self)
++        self.tf_static_broadcaster = StaticTransformBroadcaster(self)
+         self._publish_static_tf()
+ 
+     def publish(self, robot, sim_time_sec: float):
+@@ -150,7 +138,7 @@ class K1RosStatePublisher(Node):
+         transform.transform.rotation.x = root_state_w[4].item()
+         transform.transform.rotation.y = root_state_w[5].item()
+         transform.transform.rotation.z = root_state_w[6].item()
+-        self.tf_pub.publish(TFMessage(transforms=[transform]))
++        self.tf_broadcaster.sendTransform(transform)
+ 
+     def _publish_static_tf(self):
+         stamp = self.get_clock().now().to_msg()
+@@ -180,10 +168,7 @@ class K1RosStatePublisher(Node):
+             camera_to_optical.transform.rotation.w = FRONT_CAMERA_OPTICAL_QUAT_XYZW[3]
+             static_transforms.append(camera_to_optical)
+ 
+-        if static_transforms:
+-            # Publish the latched static transform tree without depending on the
+-            # external `tf2_ros` package, which Isaac Sim does not bundle.
+-            self.tf_static_pub.publish(TFMessage(transforms=static_transforms))
++        self.tf_static_broadcaster.sendTransform(static_transforms)
+ 
+ 
+ class SpinNode(Node):
+diff --git a/source/booster_train/booster_train/demo/runtime.py b/source/booster_train/booster_train/demo/runtime.py
+index ae0abd6..9d61a81 100644
+--- a/source/booster_train/booster_train/demo/runtime.py
++++ b/source/booster_train/booster_train/demo/runtime.py
+@@ -2,12 +2,14 @@ from __future__ import annotations
+ 
+ import argparse
+ from dataclasses import dataclass
++import os
+ 
+ from booster_assets import BOOSTER_ASSETS_DIR
+ 
+ VALID_CONTROL_MODES = ("motion_replay", "cmd_vel", "sdk_lowcmd")
+ VALID_TERRAINS = ("flat", "rough")
+ VALID_TELEOP_DEVICES = ("keyboard", "gamepad", "spacemouse", "cmd_vel", "none")
++DEFAULT_WAREHOUSE_SCENE = "/Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
+ 
+ 
+ def _normalize_namespace(namespace: str) -> str:
+@@ -23,13 +25,19 @@ class RuntimeSettings:
+     namespace: str = "k1"
+     env_count: int = 1
+     terrain: str = "flat"
+-    control_mode: str = "motion_replay"
++    control_mode: str = "cmd_vel"
++    scene_usd: str = DEFAULT_WAREHOUSE_SCENE
++    scene_prim_path: str = "/World/Warehouse"
+     freeze_motion: bool = False
+-    scene_models_dir: str = "/workspace/trainer/models"
++    scene_models_dir: str = "/workspace/scene_models"
+     scene_models_distance: float = 2.5
+     scene_models_spacing: float = 1.25
+     scene_models_height: float = 0.0
+     scene_models_scale: float = 0.01
++    physics_hz: float = 200.0
++    render_hz: float = 50.0
++    gpu_dynamics: bool = False
++    broadphase_type: str = "MBP"
+     motion_name: str = "k1_mj2_seg1"
+     motion_file: str = ""
+     policy_checkpoint: str = ""
+@@ -47,11 +55,23 @@ class RuntimeSettings:
+             raise ValueError(f"Unsupported terrain: {self.terrain}")
+         if self.teleop_device not in VALID_TELEOP_DEVICES:
+             raise ValueError(f"Unsupported teleop device: {self.teleop_device}")
++        if self.physics_hz <= 0.0:
++            raise ValueError("physics_hz must be greater than zero")
++        if self.render_hz <= 0.0:
++            raise ValueError("render_hz must be greater than zero")
+ 
+     @property
+     def normalized_namespace(self) -> str:
+         return _normalize_namespace(self.namespace)
+ 
++    @property
++    def sim_dt(self) -> float:
++        return 1.0 / self.physics_hz
++
++    @property
++    def render_interval(self) -> int:
++        return max(1, round(self.physics_hz / self.render_hz))
++
+     @property
+     def namespace_token(self) -> str:
+         if not self.normalized_namespace:
+@@ -116,8 +136,6 @@ class RuntimeSettings:
+         return f"{_sanitize_identifier(namespace)}_{base_name}"
+ 
+     def graph_path(self, base_name: str, robot_index: int = 0) -> str:
+-        # OmniGraph node names share one global namespace, so multi-env runs need
+-        # deterministic suffixes to avoid collisions between subscribers/publishers.
+         suffix_tokens = [self.namespace_token] if self.namespace_token else []
+         if self.env_count > 1:
+             suffix_tokens.append(f"robot{robot_index}")
+@@ -156,10 +174,22 @@ def add_runtime_args(parser: argparse.ArgumentParser):
+     group.add_argument(
+         "--control-mode",
+         type=str,
+-        default="motion_replay",
++        default="cmd_vel",
+         choices=VALID_CONTROL_MODES,
+         help="Runtime control surface to activate.",
+     )
++    group.add_argument(
++        "--scene-usd",
++        type=str,
++        default=os.environ.get("K1_SCENE_USD", DEFAULT_WAREHOUSE_SCENE),
++        help="Warehouse or custom USD scene to reference into the stage.",
++    )
++    group.add_argument(
++        "--scene-prim-path",
++        type=str,
++        default=os.environ.get("K1_SCENE_PRIM_PATH", "/World/Warehouse"),
++        help="Stage prim path used for the referenced scene asset.",
++    )
+     group.add_argument(
+         "--motion-name",
+         type=str,
+@@ -174,7 +204,7 @@ def add_runtime_args(parser: argparse.ArgumentParser):
+     group.add_argument(
+         "--scene-models-dir",
+         type=str,
+-        default="/workspace/trainer/models",
++        default="/workspace/scene_models",
+         help="Directory containing USD/USDZ props to spawn in front of the K1.",
+     )
+     group.add_argument(
+@@ -201,6 +231,29 @@ def add_runtime_args(parser: argparse.ArgumentParser):
+         default=0.01,
+         help="Uniform scale applied to spawned scene props.",
+     )
++    group.add_argument(
++        "--physics-hz",
++        type=float,
++        default=float(os.environ.get("K1_PHYSICS_HZ", "200.0")),
++        help="Stage physics frequency. Humanoid-safe default is 200 Hz.",
++    )
++    group.add_argument(
++        "--render-hz",
++        type=float,
++        default=float(os.environ.get("K1_RENDER_HZ", "50.0")),
++        help="Approximate render/update frequency used to derive render_interval.",
++    )
++    group.add_argument(
++        "--broadphase-type",
++        type=str,
++        default=os.environ.get("K1_BROADPHASE_TYPE", "MBP"),
++        help="PhysX broadphase type applied to the stage physics scene.",
++    )
++    group.add_argument(
++        "--enable-gpu-dynamics",
++        action="store_true",
++        help="Opt into PhysX GPU dynamics. Humanoid-safe default leaves this disabled.",
++    )
+     group.add_argument(
+         "--motion-file",
+         type=str,
+@@ -243,12 +296,18 @@ def runtime_settings_from_args(args: argparse.Namespace) -> RuntimeSettings:
+         env_count=args.env_count,
+         terrain=args.terrain,
+         control_mode=args.control_mode,
++        scene_usd=args.scene_usd,
++        scene_prim_path=args.scene_prim_path,
+         freeze_motion=args.freeze_motion,
+         scene_models_dir=args.scene_models_dir,
+         scene_models_distance=args.scene_models_distance,
+         scene_models_spacing=args.scene_models_spacing,
+         scene_models_height=args.scene_models_height,
+         scene_models_scale=args.scene_models_scale,
++        physics_hz=args.physics_hz,
++        render_hz=args.render_hz,
++        gpu_dynamics=args.enable_gpu_dynamics,
++        broadphase_type=args.broadphase_type,
+         motion_name=args.motion_name,
+         motion_file=args.motion_file,
+         policy_checkpoint=args.policy_checkpoint,
+diff --git a/source/booster_train/booster_train/demo/scene_bootstrap.py b/source/booster_train/booster_train/demo/scene_bootstrap.py
+new file mode 100644
+index 0000000..1a9bbe1
+--- /dev/null
++++ b/source/booster_train/booster_train/demo/scene_bootstrap.py
+@@ -0,0 +1,96 @@
++from __future__ import annotations
++
++import os
++from typing import Optional
++
++import carb
++import omni.usd
++from pxr import Gf, PhysxSchema, UsdGeom, UsdPhysics
++
++from booster_train.demo.runtime import RuntimeSettings
++
++
++def _find_or_create_physics_scene(stage) -> UsdPhysics.Scene:
++    for prim in stage.Traverse():
++        if prim.IsA(UsdPhysics.Scene):
++            return UsdPhysics.Scene(prim)
++
++    UsdGeom.Xform.Define(stage, "/World")
++    scene = UsdPhysics.Scene.Define(stage, "/World/physicsScene")
++    scene.CreateGravityDirectionAttr().Set(Gf.Vec3f(0.0, 0.0, -1.0))
++    scene.CreateGravityMagnitudeAttr().Set(9.81)
++    return scene
++
++
++def _resolve_scene_reference(scene_usd: str) -> str:
++    if not scene_usd:
++        return ""
++
++    expanded = os.path.expanduser(scene_usd)
++    if os.path.isabs(expanded) and os.path.exists(expanded):
++        return expanded
++
++    if "://" in scene_usd:
++        return scene_usd
++
++    try:
++        from isaacsim.storage.native import get_full_asset_path
++
++        resolved = get_full_asset_path(scene_usd)
++        if resolved:
++            return resolved
++    except Exception as exc:
++        print(f"[scene] asset lookup unavailable for {scene_usd}: {exc}", flush=True)
++
++    print(
++        f"[scene] using unresolved scene reference {scene_usd}; "
++        "set --scene-usd or K1_SCENE_USD to override if this does not resolve at runtime.",
++        flush=True,
++    )
++    return scene_usd
++
++
++def _ensure_scene_reference(stage, scene_prim_path: str, scene_reference: str) -> Optional[str]:
++    if not scene_reference:
++        return None
++
++    scene_xform = UsdGeom.Xform.Define(stage, scene_prim_path)
++    scene_prim = scene_xform.GetPrim()
++
++    if scene_prim.HasAuthoredReferences():
++        return scene_reference
++
++    scene_prim.GetReferences().AddReference(scene_reference)
++    return scene_reference
++
++
++def bootstrap_stage(settings: RuntimeSettings) -> None:
++    stage = omni.usd.get_context().get_stage()
++    if stage is None:
++        raise RuntimeError("USD stage is unavailable; cannot bootstrap the K1 warehouse scene.")
++
++    physics_scene = _find_or_create_physics_scene(stage)
++    physics_prim = physics_scene.GetPrim()
++    physx_scene = PhysxSchema.PhysxSceneAPI.Apply(physics_prim)
++
++    physics_scene.CreateTimeStepsPerSecondAttr().Set(settings.physics_hz)
++    physx_scene.CreateEnableGPUDynamicsAttr().Set(settings.gpu_dynamics)
++    physx_scene.CreateBroadphaseTypeAttr().Set(settings.broadphase_type)
++
++    carb_settings = carb.settings.get_settings()
++    carb_settings.set("/persistent/simulation/minFrameRate", int(settings.physics_hz))
++
++    scene_reference = _resolve_scene_reference(settings.scene_usd)
++    if scene_reference:
++        resolved_reference = _ensure_scene_reference(stage, settings.scene_prim_path, scene_reference)
++        print(
++            f"[scene] configured physics scene at {physics_prim.GetPath()} "
++            f"({settings.physics_hz:.0f} Hz, gpu_dynamics={settings.gpu_dynamics}, "
++            f"broadphase={settings.broadphase_type})",
++            flush=True,
++        )
++        if resolved_reference:
++            print(
++                f"[scene] referenced world asset {resolved_reference} at {settings.scene_prim_path}",
++                flush=True,
++            )
+diff --git a/source/booster_train/booster_train/demo/velocity_env.py b/source/booster_train/booster_train/demo/velocity_env.py
+index 290ffeb..57ea56b 100644
+--- a/source/booster_train/booster_train/demo/velocity_env.py
++++ b/source/booster_train/booster_train/demo/velocity_env.py
+@@ -12,10 +12,10 @@ from booster_train.tasks.manager_based.velocity.robots.k1.rough_env_cfg import K
+ def build_high_level_env_cfg(settings: RuntimeSettings) -> K1RoughEnvCfg_PLAY:
+     env_cfg = K1RoughEnvCfg_PLAY()
+     env_cfg.scene.num_envs = settings.env_count
++    env_cfg.sim.dt = settings.sim_dt
++    env_cfg.sim.render_interval = settings.render_interval
+ 
+     if settings.terrain == "flat":
+-        # Flat terrain is the easiest way to validate checkpoints and runtime wiring
+-        # before moving back to the rough-terrain training configuration.
+         env_cfg.scene.terrain.terrain_type = "plane"
+         env_cfg.scene.terrain.terrain_generator = None
+         env_cfg.curriculum.terrain_levels = None
+@@ -28,8 +28,6 @@ def build_high_level_env_cfg(settings: RuntimeSettings) -> K1RoughEnvCfg_PLAY:
+ class IsaacSimK1VelocityEnvWrapper:
+     def __init__(self, env: ManagerBasedRLEnv, command_buffer):
+         self._env = env
+-        # The environment reads this buffer from the custom command term, so the
+-        # runtime can inject ROS/teleop velocity commands without rewriting the task.
+         self._env.external_command_buffer = command_buffer
+         self.command_buffer = command_buffer
+         self.device = self._env.device
+diff --git a/source/booster_train/booster_train/tasks/manager_based/velocity/robots/k1/rough_env_cfg.py b/source/booster_train/booster_train/tasks/manager_based/velocity/robots/k1/rough_env_cfg.py
+index 3799cb0..d3a7862 100644
+--- a/source/booster_train/booster_train/tasks/manager_based/velocity/robots/k1/rough_env_cfg.py
++++ b/source/booster_train/booster_train/tasks/manager_based/velocity/robots/k1/rough_env_cfg.py
+@@ -110,8 +110,6 @@ class K1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
+     def __post_init__(self):
+         super().__post_init__()
+ 
+-        # Use the locomotion-specific URDF so the action space and collision model
+-        # match the policy-controlled walking task rather than the full demo robot.
+         self.scene.robot = BOOSTER_K1_LOCOMOTION_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+         self.scene.env_spacing = 2.5
+         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/Trunk"
+@@ -125,8 +123,6 @@ class K1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
+             resampling_time_range=(4.0, 6.0),
+             rel_standing_envs=0.02,
+             ranges=ExternalVelocityCommandCfg.Ranges(
+-                # Keep the initial command envelope conservative so early training
+-                # focuses on stable walking before exploring aggressive strafing/spins.
+                 lin_vel_x=(0.0, 0.8),
+                 lin_vel_y=(-0.15, 0.15),
+                 ang_vel_z=(-0.35, 0.35),
+@@ -185,9 +181,6 @@ class K1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
+         if terrain_generator is None:
+             return
+ 
+-        # The stock rough-terrain generator is configured for much larger training
+-        # batches. Recomputing the grid avoids generating far more tiles than the
+-        # current run can ever visit, which keeps startup time and memory use down.
+         terrain_generator.seed = self.seed
+         terrain_generator.use_cache = True
+         terrain_generator.curriculum = False
+@@ -223,9 +216,6 @@ class K1RoughEnvCfg_PLAY(K1RoughEnvCfg):
+     def __post_init__(self):
+         super().__post_init__()
+ 
+-        # The play config prioritizes fast startup and deterministic evaluation over
+-        # curriculum breadth because it is primarily used for checkpoint inspection
+-        # and the Isaac Sim cmd_vel demo runtime.
+         self.scene.num_envs = 16
+         self.episode_length_s = 40.0
+         self.scene.terrain.max_init_terrain_level = None
