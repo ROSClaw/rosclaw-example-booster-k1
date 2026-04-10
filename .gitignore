@@ -14,11 +14,20 @@ isaac-sim-runtime/vendor/booster_assets/
 isaac-sim-runtime/vendor/booster_train/
 
 # Local ROS 2 build products.
+real-hardware/ws/
 real-hardware/build/
 real-hardware/install/
 real-hardware/log/
+real-hardware/generated/*.env
+real-hardware/generated/*.xml
+real-hardware/generated/*.log
+real-hardware/dds-profile.fixed.xml
+real-hardware/dds-profile.host.xml
 
 # Local policy/checkpoint experiments.
+checkpoints/*.pt
+checkpoints/*.onnx
+checkpoints/*.jit
 *.pt
 *.pth
 *.onnx

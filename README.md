@@ -1,14 +1,61 @@
-# ROSClaw Booster K1 Example
+# ROSClaw Booster K1
 
-This repo contains the Booster K1 example wiring for ROSClaw/OpenClaw and the
-Isaac Sim 5.x helper runtime. External code is referenced as git submodules;
-local modifications for those repos are kept as patch files under `patches/`
-and are applied by the setup script.
+This repo contains both Booster K1 paths used by ROSClaw:
 
-## External Setup
+- a real-hardware ROS 2 workspace and DDS setup for the physical Booster K1
+- an Isaac Sim 5.x/OpenClaw helper runtime for the simulated Booster K1
 
-After cloning, initialize the external repos and apply the local K1 integration
-patches:
+External code is referenced as git submodules. Local modifications for those
+external repos are kept as patch files under `patches/` and are applied by the
+setup script.
+
+## Layout
+
+- `dds-profile.xml`: project-root Fast DDS profile aligned with the robot and this host
+- `setup-dds-env.sh`: shell setup that removes Conda from the active environment and exports the Fast DDS profile
+- `real-hardware/`: ROS 2 workspace used for the host-side SDK, DDS tests, and relay package
+- `real-hardware/src/booster_robotics_sdk_ros2`: upstream Booster ROS 2 SDK as a git submodule
+- `real-hardware/src/k1_low_level_relay`: robot-local relay package for republishing bare DDS low-level topics as ROS 2 topics under `/k1`
+- `simulators/isaac-sim/`: Docker/WebRTC helper scripts for the K1 Isaac Sim runtime
+- `isaac-sim-runtime/`: local Isaac Sim 5.x runtime entrypoint used by the simulator helper
+- `external/`: submodules used by the simulator setup script
+- `patches/`: reproducible local modifications applied to external submodules
+
+## Real Hardware DDS Setup
+
+Initialize the Booster SDK submodule if needed:
+
+```bash
+git submodule update --init -- real-hardware/src/booster_robotics_sdk_ros2
+```
+
+Source the DDS environment from the repo root:
+
+```bash
+source ./setup-dds-env.sh
+```
+
+That script:
+
+- removes Conda Python paths and environment variables
+- sources ROS 2 Humble and the `real-hardware` overlay if it has been built
+- selects `rmw_fastrtps_cpp`
+- points Fast DDS at the project-root `dds-profile.xml`
+
+Current real-hardware state:
+
+- Host-side discovery works for the main Booster RPC services.
+- Safe RPC calls to the robot were verified from the host.
+- Bare DDS state topics such as `/low_state` did not deliver reliably to the host directly.
+- The `k1_low_level_relay` package worked as a robot-local workaround and republished state topics that the host could read as `/k1/low_state` and `/k1/joint_states`.
+
+The detailed investigation notes and test results are in
+`real-hardware/DDS_HOST_MATCH_REPORT.md`.
+
+## Isaac Sim External Setup
+
+After cloning, initialize the simulator external repos and apply the local K1
+integration patches:
 
 ```bash
 ./scripts/setup_external_environment.sh
@@ -97,7 +144,9 @@ The following are local setup/build artifacts and are ignored:
 - `isaac-sim-runtime/vendor/booster_assets`
 - `isaac-sim-runtime/vendor/booster_train`
 - `isaac-sim-runtime/logs`
+- `real-hardware/ws`
 - `real-hardware/build`
 - `real-hardware/install`
 - `real-hardware/log`
+- generated real-hardware env/XML/log files
 - local `.pt`, `.pth`, and `.onnx` checkpoint experiments
