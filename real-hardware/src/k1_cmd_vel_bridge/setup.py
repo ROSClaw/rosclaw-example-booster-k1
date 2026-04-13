@@ -18,6 +18,14 @@ setup(
                 "launch/k1_openclaw_bringup.launch.py",
             ],
         ),
+        (
+            "share/" + package_name + "/config/k1",
+            [
+                "config/k1/discovery.yaml",
+                "config/k1/safety_policy.yaml",
+                "config/k1/perception.yaml",
+            ],
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

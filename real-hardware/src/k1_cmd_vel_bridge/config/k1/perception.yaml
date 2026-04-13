@@ -1,0 +1,11 @@
+# ROSClaw perception config — Booster K1 Isaac Sim
+
+/**:
+  ros__parameters:
+    camera_topic: "front_cam/rgb/compressed"
+    frame_rate: 1.0
+    gemini_model: "gemini-2.5-flash"
+    api_key_env: "GEMINI_API_KEY"
+    inference_timeout: 20.0
+    max_retries: 2
+    empty_cycles_before_refresh: 4

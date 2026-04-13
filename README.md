@@ -32,6 +32,15 @@ git submodule update --init -- \
   real-hardware/src/rosclaw-ros2-autonomy
 ```
 
+Or use the helper in real-hardware-only mode:
+
+```bash
+./scripts/setup_external_environment.sh --real-hardware-only
+```
+
+That path initializes only the `real-hardware/src/*` submodules and leaves the
+optional simulator/OpenClaw development submodules untouched.
+
 Source the DDS environment from the repo root:
 
 ```bash
@@ -61,8 +70,9 @@ Launch the host-side K1 stack with:
 ./real-hardware/bringup_openclaw_k1.sh
 ```
 
-That wrapper now defaults to the `k1` ROSClaw platform config instead of the
-generic profile and, when `rosclaw_autonomy` is built in the local
+That wrapper now defaults to the repo-local K1 ROSClaw config under
+`real-hardware/src/k1_cmd_vel_bridge/config/k1` instead of relying on a patched
+external submodule and, when `rosclaw_autonomy` is built in the local
 `real-hardware` overlay, starts `rosclaw_autonomy` a few seconds after
 `rosclaw_bringup`.
 
@@ -130,6 +140,9 @@ The setup script does the following:
 Those submodule working-tree modifications are intentionally local setup state.
 Do not commit dirty submodule changes; commit changes to the patch files here
 instead.
+The optional external development submodules are marked with `ignore = dirty`
+so a real-hardware-only workflow does not keep the superproject permanently
+dirty.
 
 Use the setup script instead of a blanket recursive submodule update. The
 upstream Booster K1 RL repo currently contains a nested `booster_assets`

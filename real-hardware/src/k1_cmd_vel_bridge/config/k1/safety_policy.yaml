@@ -1,0 +1,21 @@
+# ROSClaw safety policy — Booster K1
+
+/**:
+  ros__parameters:
+    linear_max: 1.2
+    angular_max: 1.75
+    cmd_vel_topic: "cmd_vel"
+    estop_rate: 10.0
+    allowlisted_topics:
+      - "cmd_vel"
+      - "odom"
+      - "imu"
+      - "joint_states"
+      - "front_cam/rgb/compressed"
+      - "front_cam/camera_info"
+      - "clock"
+      - "tf"
+      - "tf_static"
+      - "navigate_to_pose"
+      - "low_state"
+      - "odometer"

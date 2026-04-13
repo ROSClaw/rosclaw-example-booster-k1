@@ -1,0 +1,12 @@
+# ROSClaw discovery config — Booster K1
+
+/**:
+  ros__parameters:
+    robot_name: "Booster K1"
+    robot_namespace: ""
+    publish_interval: 2.0
+    exclude_prefixes:
+      - "/rosout"
+      - "/parameter_events"
+      - "rosclaw/manifest"
+      - "rosclaw/get_manifest"

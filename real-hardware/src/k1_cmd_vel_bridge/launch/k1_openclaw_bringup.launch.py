@@ -14,6 +14,9 @@ def generate_launch_description() -> LaunchDescription:
     platform = LaunchConfiguration("platform")
     rosbridge = LaunchConfiguration("rosbridge")
     perception = LaunchConfiguration("perception")
+    discovery_config = LaunchConfiguration("discovery_config")
+    safety_config = LaunchConfiguration("safety_config")
+    perception_config = LaunchConfiguration("perception_config")
     cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
     rpc_service_name = LaunchConfiguration("rpc_service_name")
     autonomy_startup_mode = LaunchConfiguration("autonomy_startup_mode")
@@ -29,6 +32,9 @@ def generate_launch_description() -> LaunchDescription:
             "platform": platform,
             "rosbridge": rosbridge,
             "perception": perception,
+            "discovery_config": discovery_config,
+            "safety_config": safety_config,
+            "perception_config": perception_config,
         }.items(),
     )
 
@@ -95,6 +101,27 @@ def generate_launch_description() -> LaunchDescription:
                 "perception",
                 default_value="false",
                 description="Whether to enable ROSClaw perception nodes.",
+            ),
+            DeclareLaunchArgument(
+                "discovery_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("k1_cmd_vel_bridge"), "config", "k1", "discovery.yaml"]
+                ),
+                description="Path to the K1 rosclaw discovery config.",
+            ),
+            DeclareLaunchArgument(
+                "safety_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("k1_cmd_vel_bridge"), "config", "k1", "safety_policy.yaml"]
+                ),
+                description="Path to the K1 rosclaw safety policy config.",
+            ),
+            DeclareLaunchArgument(
+                "perception_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("k1_cmd_vel_bridge"), "config", "k1", "perception.yaml"]
+                ),
+                description="Path to the K1 rosclaw perception config.",
             ),
             DeclareLaunchArgument(
                 "cmd_vel_topic",

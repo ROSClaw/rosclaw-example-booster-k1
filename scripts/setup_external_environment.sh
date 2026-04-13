@@ -6,14 +6,20 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 FORCE_VENDOR_LINKS=0
 SYNC_OPENCLAW=1
+REAL_HARDWARE_ONLY=0
 
 usage() {
     cat <<'EOF'
 Usage: ./scripts/setup_external_environment.sh [options]
 
 Prepare external repositories needed by the Booster K1 Isaac Sim example.
+Use --real-hardware-only to initialize only the real-hardware submodules and
+leave the optional simulator/OpenClaw development submodules untouched.
 
 Options:
+  --real-hardware-only      Initialize only the real-hardware submodules and skip
+                            simulator vendor links, submodule patching, and
+                            OpenClaw extension sync.
   --force-vendor-links      Move existing local vendor copies aside and replace them with submodule symlinks.
   --skip-openclaw-sync      Do not copy the patched rosclaw-plugin submodule into the local OpenClaw extension.
   -h, --help                Show this help text.
@@ -28,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --force-vendor-links)
             FORCE_VENDOR_LINKS=1
+            shift
+            ;;
+        --real-hardware-only)
+            REAL_HARDWARE_ONLY=1
             shift
             ;;
         --skip-openclaw-sync)
@@ -56,6 +66,12 @@ require_file() {
 
 ensure_submodules() {
     echo "[setup_external_environment] initializing submodules"
+    if [[ "${REAL_HARDWARE_ONLY}" == "1" ]]; then
+        git -C "${REPO_ROOT}" submodule update --init -- \
+            real-hardware/src/rosclaw-ros2-autonomy \
+            real-hardware/src/booster_robotics_sdk_ros2
+        return 0
+    fi
     git -C "${REPO_ROOT}" submodule update --init -- \
         external/booster-assets \
         external/booster-k1-rl \
@@ -164,6 +180,19 @@ sync_openclaw_extension() {
 }
 
 ensure_submodules
+if [[ "${REAL_HARDWARE_ONLY}" == "1" ]]; then
+    cat <<'EOF'
+[setup_external_environment] real-hardware submodules prepared
+
+Initialized:
+  real-hardware/src/booster_robotics_sdk_ros2
+  real-hardware/src/rosclaw-ros2-autonomy
+
+No simulator/OpenClaw external submodules were patched or synced.
+EOF
+    exit 0
+fi
+
 configure_vendor_links
 apply_patch_once \
     "${REPO_ROOT}/external/booster-k1-rl" \
