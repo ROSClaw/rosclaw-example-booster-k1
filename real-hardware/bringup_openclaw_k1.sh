@@ -18,6 +18,7 @@ ENABLE_ROSCLAW_PACKAGES="true"
 ENABLE_AUTONOMY="true"
 ENSURE_ROBOT_RELAY="true"
 ENABLE_CMD_VEL_BRIDGE="true"
+ENABLE_VISIONOS_BACKEND="true"
 RELAY_ONLY="false"
 FORCE_ROBOT_RELAY_BUILD="false"
 DRY_RUN="false"
@@ -27,6 +28,9 @@ AUTONOMY_STARTUP_MODE="${AUTONOMY_STARTUP_MODE:-MANUAL}"
 AUTONOMY_DEFAULT_EXECUTOR="${AUTONOMY_DEFAULT_EXECUTOR:-auto}"
 AUTONOMY_IDLE_ROAM_STRATEGY="${AUTONOMY_IDLE_ROAM_STRATEGY:-frontier}"
 AUTONOMY_START_DELAY_SEC="${AUTONOMY_START_DELAY_SEC:-3}"
+VISIONOS_BACKEND_PORT="${VISIONOS_BACKEND_PORT:-8088}"
+VISIONOS_OPENCLAW_AGENT_ID="${VISIONOS_OPENCLAW_AGENT_ID:-main}"
+VISIONOS_OPENCLAW_SESSION_ID="${VISIONOS_OPENCLAW_SESSION_ID:-${VISIONOS_OPENCLAW_SESSION_KEY:-k1-visionos}}"
 ROSCLAW_REPO_CONFIG_ROOT_DEFAULT="${SCRIPT_DIR}/src/k1_cmd_vel_bridge/config"
 
 EXTRA_LAUNCH_ARGS=()
@@ -61,10 +65,16 @@ Options:
                             extra launch overrides.
   --no-robot-relay          Skip the remote relay deployment/launch step.
   --no-cmd-vel-bridge       Skip the local /cmd_vel -> Booster RPC bridge.
+  --no-visionos-backend     Skip launching the visionOS HTTP/OpenClaw backend.
   --cmd-vel-topic TOPIC     Twist topic to bridge.
                             Default: ${CMD_VEL_TOPIC}
   --rpc-service-name NAME   Booster locomotion RPC service name.
                             Default: ${BRIDGE_RPC_SERVICE_NAME}
+  --visionos-backend-port PORT
+                            HTTP port for the visionOS backend.
+                            Default: ${VISIONOS_BACKEND_PORT}
+  Environment override: VISIONOS_OPENCLAW_SESSION_ID
+                        Falls back to legacy VISIONOS_OPENCLAW_SESSION_KEY.
   --force-robot-relay-build Re-copy and rebuild the relay workspace on robot.
   --relay-only              Only ensure the robot relay is running.
   --dry-run                 Print commands without executing them.
@@ -210,12 +220,20 @@ while (($# > 0)); do
       ENABLE_CMD_VEL_BRIDGE="false"
       shift
       ;;
+    --no-visionos-backend)
+      ENABLE_VISIONOS_BACKEND="false"
+      shift
+      ;;
     --cmd-vel-topic)
       CMD_VEL_TOPIC="$2"
       shift 2
       ;;
     --rpc-service-name)
       BRIDGE_RPC_SERVICE_NAME="$2"
+      shift 2
+      ;;
+    --visionos-backend-port)
+      VISIONOS_BACKEND_PORT="$2"
       shift 2
       ;;
     --force-robot-relay-build)
@@ -255,6 +273,9 @@ done
 
 RUN_LOCAL_HOST_STACK="false"
 if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" || "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
+  RUN_LOCAL_HOST_STACK="true"
+fi
+if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
   RUN_LOCAL_HOST_STACK="true"
 fi
 
@@ -375,7 +396,7 @@ if [[ "${RELAY_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-log "Launching local host stack (rosclaw_packages=${ENABLE_ROSCLAW_PACKAGES}, platform=${PLATFORM}, rosbridge=${ENABLE_ROSBRIDGE}, perception=${ENABLE_PERCEPTION}, cmd_vel_bridge=${ENABLE_CMD_VEL_BRIDGE}, autonomy=${ENABLE_AUTONOMY})"
+log "Launching local host stack (rosclaw_packages=${ENABLE_ROSCLAW_PACKAGES}, platform=${PLATFORM}, rosbridge=${ENABLE_ROSBRIDGE}, perception=${ENABLE_PERCEPTION}, cmd_vel_bridge=${ENABLE_CMD_VEL_BRIDGE}, autonomy=${ENABLE_AUTONOMY}, visionos_backend=${ENABLE_VISIONOS_BACKEND})"
 if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
   reset_ros_overlay_env
   export ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY=1
@@ -388,6 +409,14 @@ if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
   if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" && "${ENABLE_AUTONOMY}" == "true" ]]; then
     if ! ros2 pkg prefix rosclaw_autonomy >/dev/null 2>&1; then
       die "rosclaw_autonomy is not available in the sourced overlays. Build the real-hardware workspace after initializing real-hardware/src/rosclaw-ros2-autonomy."
+    fi
+  fi
+  if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+    if ! ros2 pkg prefix k1_openclaw_mission_bridge >/dev/null 2>&1; then
+      die "k1_openclaw_mission_bridge is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! ros2 pkg prefix k1_visionos_rtabmap_bridge >/dev/null 2>&1; then
+      die "k1_visionos_rtabmap_bridge is not available in the sourced overlays. Build the real-hardware workspace."
     fi
   fi
 fi
@@ -416,6 +445,13 @@ AUTONOMY_COMMAND=(
   -p "cmd_vel_topic:=${CMD_VEL_TOPIC}"
 )
 
+VISIONOS_BACKEND_COMMAND=(
+  ros2 launch k1_openclaw_mission_bridge k1_visionos_backend.launch.py
+  "port:=${VISIONOS_BACKEND_PORT}"
+  "openclaw_agent_id:=${VISIONOS_OPENCLAW_AGENT_ID}"
+  "openclaw_session_id:=${VISIONOS_OPENCLAW_SESSION_ID}"
+)
+
 cleanup() {
   if [[ -n "${autonomy_pid:-}" ]]; then
     kill "${autonomy_pid}" >/dev/null 2>&1 || true
@@ -424,6 +460,10 @@ cleanup() {
   if [[ -n "${bridge_pid:-}" ]]; then
     kill "${bridge_pid}" >/dev/null 2>&1 || true
     wait "${bridge_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${visionos_backend_pid:-}" ]]; then
+    kill "${visionos_backend_pid}" >/dev/null 2>&1 || true
+    wait "${visionos_backend_pid}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${rosclaw_pid:-}" ]]; then
     kill "${rosclaw_pid}" >/dev/null 2>&1 || true
@@ -441,6 +481,9 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
     run_cmd "${BRIDGE_COMMAND[@]}"
   fi
+  if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+    run_cmd "${VISIONOS_BACKEND_COMMAND[@]}"
+  fi
   if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" ]]; then
     run_cmd "${LOCAL_LAUNCH_COMMAND[@]}"
     if [[ "${ENABLE_AUTONOMY}" == "true" ]]; then
@@ -450,6 +493,11 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     log "Skipping ROSClaw package launch"
   fi
 else
+  if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+    "${VISIONOS_BACKEND_COMMAND[@]}" &
+    visionos_backend_pid=$!
+    sleep 2
+  fi
   if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" ]]; then
     if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
       "${BRIDGE_COMMAND[@]}" &

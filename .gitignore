@@ -7,6 +7,8 @@ __pycache__/
 *.pyo
 *.swp
 *.swo
+xcuserdata/
+*.xcuserstate
 
 # Local generated simulator/runtime state.
 isaac-sim-runtime/logs/
