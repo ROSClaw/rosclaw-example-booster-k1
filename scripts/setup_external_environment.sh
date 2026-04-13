@@ -61,6 +61,7 @@ ensure_submodules() {
         external/booster-k1-rl \
         external/rosclaw-ros2 \
         external/rosclaw-plugin \
+        real-hardware/src/rosclaw-ros2-autonomy \
         real-hardware/src/booster_robotics_sdk_ros2
 }
 

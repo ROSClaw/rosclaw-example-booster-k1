@@ -15,6 +15,7 @@ setup script.
 - `setup-dds-env.sh`: shell setup that removes Conda from the active environment and exports the Fast DDS profile
 - `real-hardware/`: ROS 2 workspace used for the host-side SDK, DDS tests, and relay package
 - `real-hardware/src/booster_robotics_sdk_ros2`: upstream Booster ROS 2 SDK as a git submodule
+- `real-hardware/src/rosclaw-ros2-autonomy`: ROSClaw autonomy overlay as a git submodule
 - `real-hardware/src/k1_low_level_relay`: robot-local relay package for republishing bare DDS low-level topics as ROS 2 topics under `/k1`
 - `simulators/isaac-sim/`: Docker/WebRTC helper scripts for the K1 Isaac Sim runtime
 - `isaac-sim-runtime/`: local Isaac Sim 5.x runtime entrypoint used by the simulator helper
@@ -26,7 +27,9 @@ setup script.
 Initialize the Booster SDK submodule if needed:
 
 ```bash
-git submodule update --init -- real-hardware/src/booster_robotics_sdk_ros2
+git submodule update --init -- \
+  real-hardware/src/booster_robotics_sdk_ros2 \
+  real-hardware/src/rosclaw-ros2-autonomy
 ```
 
 Source the DDS environment from the repo root:
@@ -51,6 +54,48 @@ Current real-hardware state:
 
 The detailed investigation notes and test results are in
 `real-hardware/DDS_HOST_MATCH_REPORT.md`.
+
+Launch the host-side K1 stack with:
+
+```bash
+./real-hardware/bringup_openclaw_k1.sh
+```
+
+That wrapper now defaults to the `k1` ROSClaw platform config instead of the
+generic profile and, when `rosclaw_autonomy` is built in the local
+`real-hardware` overlay, starts `rosclaw_autonomy` a few seconds after
+`rosclaw_bringup`.
+
+Build the local real-hardware overlay with autonomy on top of the existing
+`rosclaw-ros2` install:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+cd real-hardware
+colcon build --packages-select rosclaw_autonomy_msgs rosclaw_autonomy
+```
+
+## ROS 2 CLI Caveat
+
+If `/rosclaw/manifest` shows the full graph but `ros2 topic list` only shows a
+small subset, the robot is usually fine and the local ROS 2 daemon is stale or
+was started from a different DDS environment.
+
+After sourcing `./setup-dds-env.sh`, either:
+
+```bash
+ros2 daemon stop
+ros2 topic list
+```
+
+or query the graph directly:
+
+```bash
+ros2 topic list --no-daemon
+ros2 service list --no-daemon
+ros2 node list --no-daemon
+```
 
 ## Isaac Sim External Setup
 

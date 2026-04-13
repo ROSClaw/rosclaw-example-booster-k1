@@ -13,3 +13,6 @@
 [submodule "external/booster-assets"]
 	path = external/booster-assets
 	url = https://github.com/BoosterRobotics/booster_assets
+[submodule "real-hardware/src/rosclaw-ros2-autonomy"]
+	path = real-hardware/src/rosclaw-ros2-autonomy
+	url = https://github.com/ROSClaw/rosclaw-ros2-autonomy
