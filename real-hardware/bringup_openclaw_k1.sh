@@ -21,6 +21,7 @@ ENABLE_CMD_VEL_BRIDGE="true"
 ENABLE_VISIONOS_BACKEND="true"
 RELAY_ONLY="false"
 FORCE_ROBOT_RELAY_BUILD="false"
+FORCE_LOCAL_HOST_BUILD="false"
 DRY_RUN="false"
 CMD_VEL_TOPIC="/cmd_vel"
 BRIDGE_RPC_SERVICE_NAME="/booster_rpc_service"
@@ -75,6 +76,9 @@ Options:
                             Default: ${VISIONOS_BACKEND_PORT}
   Environment override: VISIONOS_OPENCLAW_SESSION_ID
                         Falls back to legacy VISIONOS_OPENCLAW_SESSION_KEY.
+  --force-local-host-build
+                            Rebuild relevant local host packages in
+                            real-hardware before launching.
   --force-robot-relay-build Re-copy and rebuild the relay workspace on robot.
   --relay-only              Only ensure the robot relay is running.
   --dry-run                 Print commands without executing them.
@@ -151,6 +155,98 @@ append_repo_platform_config_override() {
   fi
   if [[ -f "${config_path}" ]]; then
     EXTRA_LAUNCH_ARGS+=("${arg_name}:=${config_path}")
+  fi
+}
+
+source_local_host_env() {
+  reset_ros_overlay_env
+  export ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY=1
+  source_compat "${LOCAL_DDS_SETUP}" >/tmp/rosclaw-dds-env.log
+  unset ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY
+  source_compat "${ROSCLAW_SETUP_BASH}"
+  export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
+  export ROS_LOG_DIR
+}
+
+package_available() {
+  local package_name="$1"
+  ros2 pkg prefix "${package_name}" >/dev/null 2>&1
+}
+
+LOCAL_HOST_BUILD_PACKAGES=()
+
+append_local_host_build_package() {
+  local package_name="$1"
+  local existing_package
+  for existing_package in "${LOCAL_HOST_BUILD_PACKAGES[@]:-}"; do
+    if [[ "${existing_package}" == "${package_name}" ]]; then
+      return 0
+    fi
+  done
+  LOCAL_HOST_BUILD_PACKAGES+=("${package_name}")
+}
+
+schedule_local_host_package_group() {
+  local group_name="$1"
+  shift
+  local package_name
+  local should_build="${FORCE_LOCAL_HOST_BUILD}"
+
+  if [[ "${should_build}" != "true" ]]; then
+    should_build="false"
+    for package_name in "$@"; do
+      if ! package_available "${package_name}"; then
+        should_build="true"
+        break
+      fi
+    done
+  fi
+
+  if [[ "${should_build}" != "true" ]]; then
+    return 0
+  fi
+
+  if [[ "${FORCE_LOCAL_HOST_BUILD}" == "true" ]]; then
+    log "Force-building ${group_name} packages in the local host workspace"
+  else
+    log "${group_name} packages are missing from the sourced overlays; building them in the local host workspace"
+  fi
+
+  for package_name in "$@"; do
+    append_local_host_build_package "${package_name}"
+  done
+}
+
+build_local_host_packages() {
+  local build_packages=("$@")
+  [[ ${#build_packages[@]} -gt 0 ]] || return 0
+
+  log "Building local host packages: ${build_packages[*]}"
+  (
+    set -eo pipefail
+    cd "${SCRIPT_DIR}"
+    colcon build --packages-select "${build_packages[@]}"
+  )
+}
+
+ensure_local_host_packages() {
+  LOCAL_HOST_BUILD_PACKAGES=()
+
+  if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
+    schedule_local_host_package_group "K1 cmd_vel bridge" booster_interface k1_cmd_vel_bridge
+  fi
+
+  if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" && "${ENABLE_AUTONOMY}" == "true" ]]; then
+    schedule_local_host_package_group "ROSClaw autonomy" rosclaw_autonomy_msgs rosclaw_autonomy
+  fi
+
+  if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+    schedule_local_host_package_group "visionOS backend" rosclaw_autonomy_msgs k1_openclaw_mission_bridge k1_visionos_rtabmap_bridge
+  fi
+
+  if [[ ${#LOCAL_HOST_BUILD_PACKAGES[@]} -gt 0 ]]; then
+    build_local_host_packages "${LOCAL_HOST_BUILD_PACKAGES[@]}"
+    source_local_host_env
   fi
 }
 
@@ -238,6 +334,10 @@ while (($# > 0)); do
       ;;
     --force-robot-relay-build)
       FORCE_ROBOT_RELAY_BUILD="true"
+      shift
+      ;;
+    --force-local-host-build)
+      FORCE_LOCAL_HOST_BUILD="true"
       shift
       ;;
     --relay-only)
@@ -398,24 +498,33 @@ fi
 
 log "Launching local host stack (rosclaw_packages=${ENABLE_ROSCLAW_PACKAGES}, platform=${PLATFORM}, rosbridge=${ENABLE_ROSBRIDGE}, perception=${ENABLE_PERCEPTION}, cmd_vel_bridge=${ENABLE_CMD_VEL_BRIDGE}, autonomy=${ENABLE_AUTONOMY}, visionos_backend=${ENABLE_VISIONOS_BACKEND})"
 if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
-  reset_ros_overlay_env
-  export ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY=1
-  source_compat "${LOCAL_DDS_SETUP}" >/tmp/rosclaw-dds-env.log
-  unset ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY
-  source_compat "${ROSCLAW_SETUP_BASH}"
-  export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-  export ROS_LOG_DIR
+  source_local_host_env
+  ensure_local_host_packages
   log "ROS 2 CLI note: if another shell shows an incomplete topic list, source ${LOCAL_DDS_SETUP} there and run 'ros2 daemon stop' or use '--no-daemon'."
+  if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
+    if ! package_available booster_interface; then
+      die "booster_interface is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! package_available k1_cmd_vel_bridge; then
+      die "k1_cmd_vel_bridge is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+  fi
   if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" && "${ENABLE_AUTONOMY}" == "true" ]]; then
+    if ! package_available rosclaw_autonomy_msgs; then
+      die "rosclaw_autonomy_msgs is not available in the sourced overlays. Build the real-hardware workspace after initializing real-hardware/src/rosclaw-ros2-autonomy."
+    fi
     if ! ros2 pkg prefix rosclaw_autonomy >/dev/null 2>&1; then
       die "rosclaw_autonomy is not available in the sourced overlays. Build the real-hardware workspace after initializing real-hardware/src/rosclaw-ros2-autonomy."
     fi
   fi
   if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
-    if ! ros2 pkg prefix k1_openclaw_mission_bridge >/dev/null 2>&1; then
+    if ! package_available rosclaw_autonomy_msgs; then
+      die "rosclaw_autonomy_msgs is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! package_available k1_openclaw_mission_bridge; then
       die "k1_openclaw_mission_bridge is not available in the sourced overlays. Build the real-hardware workspace."
     fi
-    if ! ros2 pkg prefix k1_visionos_rtabmap_bridge >/dev/null 2>&1; then
+    if ! package_available k1_visionos_rtabmap_bridge; then
       die "k1_visionos_rtabmap_bridge is not available in the sourced overlays. Build the real-hardware workspace."
     fi
   fi
