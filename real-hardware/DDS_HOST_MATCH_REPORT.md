@@ -533,3 +533,43 @@ Result:
 5. If you want a lower-risk workaround before changing the native motion stack, keep using the robot-local relay node in `k1_low_level_relay` to expose namespaced ROS 2 topics like `/k1/low_state` and `/k1/joint_states`.
 6. If you want command control through the relay, validate `/k1/joint_ctrl` or `/k1/low_cmd` carefully on hardware once the robot is in a safe state.
 7. If you still want to trial CycloneDDS, audit which robot publishers are true ROS 2 nodes versus DDS-native processes first. `/low_state` appears as `_CREATED_BY_BARE_DDS_APP_`, so switching only the ROS 2 RMW may not move that publisher to CycloneDDS.
+
+## April 2026 K1 Service Loop Fix
+
+Observed on April 15, 2026 on the live K1:
+
+- repeated torque disable and re-enable with the motion boot sound
+- repeated restarts of locomotion-facing services without a full Jetson reboot
+- kernel and systemd reports showing OOM kills across the Booster ROS 2 stack
+
+The immediate offenders were the robot-side ROS 2 processes launched by
+Booster's shell scripts, especially `rpc_service_node`, `robot_state_publisher`,
+and `joy_node`. On this K1, the SHM-enabled profile
+`/opt/booster/BoosterRos2/fastdds_profile.xml` correlated with:
+
+- `RTPS_TRANSPORT_SHM` initialization errors
+- `ParticipantEntitiesInfo` `Bad alloc` errors
+- large transient RSS growth in the ROS 2 bridge processes
+- `booster-daemon.service` being OOM-killed and restarted, which retriggered
+  motor connect and produced the audible loop
+
+The fix that stabilized the robot was to switch the active Booster startup
+scripts to the existing UDP-only profile
+`/opt/booster/BoosterRos2/fastdds_profile_udp_only.xml` and then restart the
+affected services.
+
+This supersedes the earlier suggestion in this report to keep the locomotion
+bridge on `fastdds_profile.xml`. For this robot, the stable configuration was
+the UDP-only profile across the active Booster ROS 2 startup scripts.
+
+Use the repo-side helper to reapply and verify the fix:
+
+```bash
+./real-hardware/fix_k1_fastdds_udp_only.sh
+```
+
+For a non-mutating inspection:
+
+```bash
+./real-hardware/fix_k1_fastdds_udp_only.sh --check-only
+```
