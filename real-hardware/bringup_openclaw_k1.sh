@@ -20,6 +20,7 @@ ENABLE_AUTONOMY="true"
 ENSURE_ROBOT_RELAY="true"
 ENABLE_CMD_VEL_BRIDGE="true"
 ENABLE_VISIONOS_BACKEND="true"
+ENABLE_STEREO_CAMERA_BRIDGE="true"
 RELAY_ONLY="false"
 FORCE_ROBOT_RELAY_BUILD="false"
 FORCE_LOCAL_HOST_BUILD="false"
@@ -34,6 +35,13 @@ VISIONOS_BACKEND_PORT="${VISIONOS_BACKEND_PORT:-8088}"
 VISIONOS_OPENCLAW_AGENT_ID="${VISIONOS_OPENCLAW_AGENT_ID:-main}"
 VISIONOS_OPENCLAW_SESSION_ID="${VISIONOS_OPENCLAW_SESSION_ID:-${VISIONOS_OPENCLAW_SESSION_KEY:-k1-visionos}}"
 ROSCLAW_REPO_CONFIG_ROOT_DEFAULT="${SCRIPT_DIR}/src/k1_cmd_vel_bridge/config"
+STEREO_STREAM_HOST="${K1_STEREO_STREAM_HOST:-}"
+STEREO_STREAM_PORT="${K1_STEREO_STREAM_PORT:-5600}"
+STEREO_STREAM_OUTPUT_ENCODING="${K1_STEREO_STREAM_OUTPUT_ENCODING:-mono8}"
+STEREO_STREAM_OUTPUT_WIDTH="${K1_STEREO_STREAM_OUTPUT_WIDTH:-512}"
+STEREO_STREAM_OUTPUT_HEIGHT="${K1_STEREO_STREAM_OUTPUT_HEIGHT:-512}"
+STEREO_STREAM_MAX_FPS="${K1_STEREO_STREAM_MAX_FPS:-12.0}"
+STEREO_STREAM_JPEG_QUALITY="${K1_STEREO_STREAM_JPEG_QUALITY:-80}"
 
 EXTRA_LAUNCH_ARGS=()
 
@@ -70,6 +78,7 @@ Options:
   --no-robot-relay          Skip the remote relay deployment/launch step.
   --no-cmd-vel-bridge       Skip the local /cmd_vel -> Booster RPC bridge.
   --no-visionos-backend     Skip launching the visionOS HTTP/OpenClaw backend.
+  --no-stereo-camera-bridge Skip launching the stereo camera host bridge.
   --cmd-vel-topic TOPIC     Twist topic to bridge.
                             Default: ${CMD_VEL_TOPIC}
   --rpc-service-name NAME   Booster locomotion RPC service name.
@@ -77,6 +86,8 @@ Options:
   --visionos-backend-port PORT
                             HTTP port for the visionOS backend.
                             Default: ${VISIONOS_BACKEND_PORT}
+  --stereo-stream-port PORT TCP port for robot stereo camera transport.
+                            Default: ${STEREO_STREAM_PORT}
   Environment override: VISIONOS_OPENCLAW_SESSION_ID
                         Falls back to legacy VISIONOS_OPENCLAW_SESSION_KEY.
   --force-local-host-build
@@ -314,6 +325,10 @@ ensure_local_host_packages() {
     schedule_local_host_package_group "visionOS backend" rosclaw_autonomy_msgs k1_openclaw_mission_bridge k1_visionos_rtabmap_bridge
   fi
 
+  if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
+    schedule_local_host_package_group "stereo camera bridge" k1_low_level_relay
+  fi
+
   if [[ ${#LOCAL_HOST_BUILD_PACKAGES[@]} -gt 0 ]]; then
     build_local_host_packages "${LOCAL_HOST_BUILD_PACKAGES[@]}"
     source_local_host_env
@@ -403,6 +418,10 @@ while (($# > 0)); do
       ENABLE_VISIONOS_BACKEND="false"
       shift
       ;;
+    --no-stereo-camera-bridge)
+      ENABLE_STEREO_CAMERA_BRIDGE="false"
+      shift
+      ;;
     --cmd-vel-topic)
       CMD_VEL_TOPIC="$2"
       shift 2
@@ -413,6 +432,10 @@ while (($# > 0)); do
       ;;
     --visionos-backend-port)
       VISIONOS_BACKEND_PORT="$2"
+      shift 2
+      ;;
+    --stereo-stream-port)
+      STEREO_STREAM_PORT="$2"
       shift 2
       ;;
     --force-robot-relay-build)
@@ -452,6 +475,10 @@ while (($# > 0)); do
   esac
 done
 
+if [[ -z "${STEREO_STREAM_HOST}" ]]; then
+  STEREO_STREAM_HOST="${ROBOT_HOST##*@}"
+fi
+
 [[ -f "${LOCAL_DDS_SETUP}" ]] || die "Missing DDS setup script: ${LOCAL_DDS_SETUP}"
 
 RUN_LOCAL_HOST_STACK="false"
@@ -459,6 +486,9 @@ if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" || "${ENABLE_CMD_VEL_BRIDGE}" == "t
   RUN_LOCAL_HOST_STACK="true"
 fi
 if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+  RUN_LOCAL_HOST_STACK="true"
+fi
+if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
   RUN_LOCAL_HOST_STACK="true"
 fi
 
@@ -485,8 +515,11 @@ ensure_robot_relay() {
     remote_check_script=$(cat <<'EOF'
 set -euo pipefail
 robot_ws="$1"
-node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
-if [[ -x "${node_exe}" ]] && pgrep -f "${node_exe}" >/dev/null 2>&1; then
+low_node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
+camera_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_stereo_stream_server_node"
+if [[ -x "${low_node_exe}" ]] && [[ -x "${camera_server_exe}" ]] && \
+   pgrep -f "${low_node_exe}" >/dev/null 2>&1 && \
+   pgrep -f "${camera_server_exe}" >/dev/null 2>&1; then
   exit 0
 fi
 exit 1
@@ -549,24 +582,50 @@ EOF
   remote_launch_script=$(cat <<'EOF'
 set -eo pipefail
 robot_ws="$1"
-node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
-pkill -f "${node_exe}" >/dev/null 2>&1 || true
+low_node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
+camera_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_stereo_stream_server_node"
+stream_port="$2"
+output_encoding="$3"
+output_width="$4"
+output_height="$5"
+max_fps="$6"
+jpeg_quality="$7"
+pkill -f "${low_node_exe}" >/dev/null 2>&1 || true
+pkill -f "${camera_server_exe}" >/dev/null 2>&1 || true
 set +u
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
+source /opt/booster/BoosterRos2/install/setup.bash >/dev/null 2>&1
 source "${robot_ws}/install/setup.bash"
 set -u
 unset FASTDDS_DEFAULT_PROFILES_FILE RMW_IMPLEMENTATION
-export FASTRTPS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile_udp_only.xml
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
 export ROS_LOG_DIR=/tmp/roslogs
 mkdir -p "${ROS_LOG_DIR}"
-nohup "${node_exe}" --ros-args -r __node:=k1_low_level_relay >/tmp/k1-relay.log 2>&1 < /dev/null &
+nohup "${low_node_exe}" --ros-args -r __node:=k1_low_level_relay >/tmp/k1-relay.log 2>&1 < /dev/null &
+nohup "${camera_server_exe}" --ros-args -r __node:=k1_stereo_stream_server \
+  -p "bind_host:=0.0.0.0" \
+  -p "port:=${stream_port}" \
+  -p "output_encoding:=${output_encoding}" \
+  -p "output_width:=${output_width}" \
+  -p "output_height:=${output_height}" \
+  -p "max_fps:=${max_fps}" \
+  -p "jpeg_quality:=${jpeg_quality}" >/tmp/k1-camera-stream-server.log 2>&1 < /dev/null &
 sleep 3
-pgrep -af "${node_exe}"
+pgrep -af "${low_node_exe}"
+pgrep -af "${camera_server_exe}"
 EOF
 )
-  run_remote_script "${remote_launch_script}" "${ROBOT_RELAY_WS}"
+  run_remote_script \
+    "${remote_launch_script}" \
+    "${ROBOT_RELAY_WS}" \
+    "${STEREO_STREAM_PORT}" \
+    "${STEREO_STREAM_OUTPUT_ENCODING}" \
+    "${STEREO_STREAM_OUTPUT_WIDTH}" \
+    "${STEREO_STREAM_OUTPUT_HEIGHT}" \
+    "${STEREO_STREAM_MAX_FPS}" \
+    "${STEREO_STREAM_JPEG_QUALITY}"
 }
 
 if [[ "${ENSURE_ROBOT_RELAY}" == "true" ]]; then
@@ -578,7 +637,7 @@ if [[ "${RELAY_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-log "Launching local host stack (rosclaw_packages=${ENABLE_ROSCLAW_PACKAGES}, platform=${PLATFORM}, rosbridge=${ENABLE_ROSBRIDGE}, perception=${ENABLE_PERCEPTION}, cmd_vel_bridge=${ENABLE_CMD_VEL_BRIDGE}, autonomy=${ENABLE_AUTONOMY}, visionos_backend=${ENABLE_VISIONOS_BACKEND})"
+log "Launching local host stack (rosclaw_packages=${ENABLE_ROSCLAW_PACKAGES}, platform=${PLATFORM}, rosbridge=${ENABLE_ROSBRIDGE}, perception=${ENABLE_PERCEPTION}, cmd_vel_bridge=${ENABLE_CMD_VEL_BRIDGE}, autonomy=${ENABLE_AUTONOMY}, visionos_backend=${ENABLE_VISIONOS_BACKEND}, stereo_camera_bridge=${ENABLE_STEREO_CAMERA_BRIDGE})"
 if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
   source_local_host_env
   ensure_local_host_packages
@@ -608,6 +667,11 @@ if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
     fi
     if ! package_available k1_visionos_rtabmap_bridge; then
       die "k1_visionos_rtabmap_bridge is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+  fi
+  if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
+    if ! package_available k1_low_level_relay; then
+      die "k1_low_level_relay is not available in the sourced overlays. Build the real-hardware workspace."
     fi
   fi
 fi
@@ -643,6 +707,13 @@ VISIONOS_BACKEND_COMMAND=(
   "openclaw_session_id:=${VISIONOS_OPENCLAW_SESSION_ID}"
 )
 
+CAMERA_STREAM_CLIENT_COMMAND=(
+  ros2 run k1_low_level_relay k1_stereo_stream_client_node
+  --ros-args
+  -p "server_host:=${STEREO_STREAM_HOST}"
+  -p "server_port:=${STEREO_STREAM_PORT}"
+)
+
 cleanup() {
   if [[ -n "${autonomy_pid:-}" ]]; then
     kill "${autonomy_pid}" >/dev/null 2>&1 || true
@@ -651,6 +722,10 @@ cleanup() {
   if [[ -n "${bridge_pid:-}" ]]; then
     kill "${bridge_pid}" >/dev/null 2>&1 || true
     wait "${bridge_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${camera_stream_client_pid:-}" ]]; then
+    kill "${camera_stream_client_pid}" >/dev/null 2>&1 || true
+    wait "${camera_stream_client_pid}" >/dev/null 2>&1 || true
   fi
   if [[ -n "${visionos_backend_pid:-}" ]]; then
     kill "${visionos_backend_pid}" >/dev/null 2>&1 || true
@@ -672,6 +747,9 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
     run_cmd "${BRIDGE_COMMAND[@]}"
   fi
+  if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
+    run_cmd "${CAMERA_STREAM_CLIENT_COMMAND[@]}"
+  fi
   if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
     run_cmd "${VISIONOS_BACKEND_COMMAND[@]}"
   fi
@@ -684,6 +762,11 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     log "Skipping ROSClaw package launch"
   fi
 else
+  if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
+    "${CAMERA_STREAM_CLIENT_COMMAND[@]}" &
+    camera_stream_client_pid=$!
+    sleep 2
+  fi
   if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
     "${VISIONOS_BACKEND_COMMAND[@]}" &
     visionos_backend_pid=$!
@@ -710,6 +793,16 @@ else
     wait "${rosclaw_pid}"
   elif [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
     exec "${BRIDGE_COMMAND[@]}"
+  elif [[ -n "${camera_stream_client_pid:-}" || -n "${visionos_backend_pid:-}" ]]; then
+    auxiliary_pids=()
+    if [[ -n "${camera_stream_client_pid:-}" ]]; then
+      auxiliary_pids+=("${camera_stream_client_pid}")
+    fi
+    if [[ -n "${visionos_backend_pid:-}" ]]; then
+      auxiliary_pids+=("${visionos_backend_pid}")
+    fi
+    log "Waiting on auxiliary host processes"
+    wait "${auxiliary_pids[@]}"
   else
     log "Skipping ROSClaw package launch"
   fi

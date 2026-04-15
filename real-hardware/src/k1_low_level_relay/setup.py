@@ -22,6 +22,8 @@ setup(
     entry_points={
         "console_scripts": [
             "k1_low_level_relay_node = k1_low_level_relay.relay_node:main",
+            "k1_stereo_stream_server_node = k1_low_level_relay.stereo_stream_server_node:main",
+            "k1_stereo_stream_client_node = k1_low_level_relay.stereo_stream_client_node:main",
         ],
     },
 )
