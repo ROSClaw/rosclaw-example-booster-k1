@@ -8,6 +8,7 @@ LOCAL_DDS_SETUP="${REPO_ROOT}/setup-dds-env.sh"
 ROSCLAW_SETUP_BASH_DEFAULT="${HOME}/ros2_ws/install/local_setup.bash"
 
 ROBOT_HOST="${K1_ROBOT_HOST:-booster@192.168.2.152}"
+SSH_PASSWORD="${K1_SSH_PASSWORD:-}"
 ROBOT_RELAY_WS="${K1_ROBOT_RELAY_WS:-/tmp/k1-relay-ws}"
 ROSCLAW_SETUP_BASH="${ROSCLAW_SETUP_BASH:-${ROSCLAW_SETUP_BASH_DEFAULT}}"
 ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/roslogs}"
@@ -48,6 +49,8 @@ Bring up the K1 host-side ROS stack for OpenClaw:
 Options:
   --robot HOST              SSH target for the K1 relay deployment.
                             Default: ${ROBOT_HOST}
+  --ssh-password PASS       Non-interactive SSH password for the K1.
+                            Requires sshpass when set.
   --robot-relay-ws PATH     Remote workspace used for the relay.
                             Default: ${ROBOT_RELAY_WS}
   --rosclaw-setup PATH      setup.bash for the built rosclaw-ros2 overlay.
@@ -84,6 +87,12 @@ Options:
   --dry-run                 Print commands without executing them.
   -h, --help                Show this help.
 
+Environment:
+  K1_ROBOT_HOST             Default SSH target for the K1 relay deployment.
+  K1_SSH_PASSWORD           Optional non-interactive SSH password.
+                            Without it, SSH connection sharing reduces the
+                            relay path to a single password prompt.
+
 Extra args after -- are passed directly to:
   ros2 launch rosclaw_bringup rosclaw.launch.py ...
 
@@ -113,6 +122,13 @@ run_cmd() {
   "$@"
 }
 
+SSH_OPTS=(-o StrictHostKeyChecking=no)
+SCP_OPTS=(-o StrictHostKeyChecking=no)
+SSH_CMD=(ssh)
+SCP_CMD=(scp)
+SSH_CONTROL_PATH=""
+SSH_MASTER_STARTED="false"
+
 source_compat() {
   local target="$1"
   local restore_nounset=0
@@ -133,6 +149,60 @@ reset_ros_overlay_env() {
   unset COLCON_PREFIX_PATH
   unset LD_LIBRARY_PATH
   unset PYTHONPATH
+}
+
+configure_ssh_transport() {
+  if [[ -z "${SSH_CONTROL_PATH}" ]]; then
+    SSH_CONTROL_PATH="${TMPDIR:-/tmp}/rosclaw-k1-ssh-%r@%h:%p"
+  fi
+
+  SSH_OPTS=(
+    -o StrictHostKeyChecking=no
+    -o ControlMaster=auto
+    -o ControlPersist=10m
+    -o "ControlPath=${SSH_CONTROL_PATH}"
+  )
+  SCP_OPTS=(
+    -o StrictHostKeyChecking=no
+    -o ControlMaster=auto
+    -o ControlPersist=10m
+    -o "ControlPath=${SSH_CONTROL_PATH}"
+  )
+
+  SSH_CMD=(ssh)
+  SCP_CMD=(scp)
+  if [[ -n "${SSH_PASSWORD}" ]]; then
+    if [[ "${DRY_RUN}" != "true" ]]; then
+      command -v sshpass >/dev/null 2>&1 || die "sshpass is required when --ssh-password or K1_SSH_PASSWORD is set"
+    fi
+    SSH_CMD=(sshpass -p "${SSH_PASSWORD}" ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password)
+    SCP_CMD=(sshpass -p "${SSH_PASSWORD}" scp -o PubkeyAuthentication=no -o PreferredAuthentications=password)
+  fi
+}
+
+start_ssh_master() {
+  [[ "${ENSURE_ROBOT_RELAY}" == "true" ]] || return 0
+  [[ "${SSH_MASTER_STARTED}" != "true" ]] || return 0
+  configure_ssh_transport
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    printf '[dry-run]'
+    printf ' %q' "${SSH_CMD[@]}" "${SSH_OPTS[@]}" -MNf "${ROBOT_HOST}"
+    printf '\n'
+    SSH_MASTER_STARTED="true"
+    return 0
+  fi
+
+  "${SSH_CMD[@]}" "${SSH_OPTS[@]}" -MNf "${ROBOT_HOST}"
+  SSH_MASTER_STARTED="true"
+}
+
+stop_ssh_master() {
+  [[ "${SSH_MASTER_STARTED}" == "true" ]] || return 0
+  if [[ "${DRY_RUN}" != "true" ]]; then
+    "${SSH_CMD[@]}" "${SSH_OPTS[@]}" -O exit "${ROBOT_HOST}" >/dev/null 2>&1 || true
+  fi
+  SSH_MASTER_STARTED="false"
 }
 
 launch_arg_override_present() {
@@ -253,27 +323,40 @@ ensure_local_host_packages() {
 run_remote_script() {
   local script_body="$1"
   shift
+  configure_ssh_transport
   if [[ "${DRY_RUN}" == "true" ]]; then
-    printf '[dry-run] ssh %q bash -s --' "${ROBOT_HOST}"
+    printf '[dry-run]'
+    printf ' %q' "${SSH_CMD[@]}" "${SSH_OPTS[@]}" "${ROBOT_HOST}" bash -s --
     for arg in "$@"; do
       printf ' %q' "${arg}"
     done
     printf ' <<REMOTE_SCRIPT\n%s\nREMOTE_SCRIPT\n' "${script_body}"
     return 0
   fi
-  ssh "${SSH_OPTS[@]}" "${ROBOT_HOST}" bash -s -- "$@" <<<"${script_body}"
+  "${SSH_CMD[@]}" "${SSH_OPTS[@]}" "${ROBOT_HOST}" bash -s -- "$@" <<<"${script_body}"
 }
 
 copy_to_robot() {
   local source_path="$1"
   local dest_path="$2"
-  run_cmd scp "${SCP_OPTS[@]}" -r "${source_path}" "${ROBOT_HOST}:${dest_path}"
+  configure_ssh_transport
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    printf '[dry-run]'
+    printf ' %q' "${SCP_CMD[@]}" "${SCP_OPTS[@]}" -r "${source_path}" "${ROBOT_HOST}:${dest_path}"
+    printf '\n'
+    return 0
+  fi
+  "${SCP_CMD[@]}" "${SCP_OPTS[@]}" -r "${source_path}" "${ROBOT_HOST}:${dest_path}"
 }
 
 while (($# > 0)); do
   case "$1" in
     --robot)
       ROBOT_HOST="$2"
+      shift 2
+      ;;
+    --ssh-password)
+      SSH_PASSWORD="$2"
       shift 2
       ;;
     --robot-relay-ws)
@@ -390,14 +473,13 @@ if [[ "${ENABLE_PERCEPTION}" == "true" ]]; then
 fi
 
 mkdir -p "${ROS_LOG_DIR}"
-
-SSH_OPTS=(-o StrictHostKeyChecking=no)
-SCP_OPTS=(-o StrictHostKeyChecking=no)
+trap stop_ssh_master EXIT
 
 ensure_robot_relay() {
   local remote_check_script remote_prep_script remote_build_script remote_launch_script
 
   log "Ensuring robot relay on ${ROBOT_HOST}"
+  start_ssh_master
 
   if [[ "${FORCE_ROBOT_RELAY_BUILD}" != "true" ]]; then
     remote_check_script=$(cat <<'EOF'
