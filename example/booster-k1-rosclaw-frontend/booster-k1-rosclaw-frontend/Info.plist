@@ -9,6 +9,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Used to reach the K1 bridge service on the robot network.</string>
+	<key>NSHandsTrackingUsageDescription</key>
+	<string>Used to show a live hand ray, detect pinch gestures, and preview floor targets before sending movement commands.</string>
 	<key>NSWorldSensingUsageDescription</key>
 	<string>Used to map the room, align the headset with the K1 global map, and place tap-to-move goals on the ground.</string>
 	<key>UIApplicationSceneManifest</key>

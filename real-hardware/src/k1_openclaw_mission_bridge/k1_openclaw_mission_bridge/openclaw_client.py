@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
+
+
+DATACLASS_KWARGS = {"slots": True} if sys.version_info >= (3, 10) else {}
 
 
 class OpenClawClientError(RuntimeError):
     """Raised when the OpenClaw CLI fails or returns malformed payloads."""
 
 
-@dataclass(slots=True)
+@dataclass(**DATACLASS_KWARGS)
 class OpenClawClient:
     binary: str
     agent_id: str
@@ -140,28 +144,125 @@ Failure JSON:
             text=True,
         )
         if completed.returncode != 0:
-            message = completed.stderr.strip() or completed.stdout.strip() or "OpenClaw agent failed."
+            message = self._summarize_failure_output(completed.stderr, completed.stdout)
             raise OpenClawClientError(message)
 
-        try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise OpenClawClientError(f"OpenClaw returned non-JSON output: {exc}") from exc
+        return self._decode_response_output(completed.stdout)
 
-        payload_text = self._extract_text_payload(envelope)
+    @classmethod
+    def _decode_response_output(cls, stdout: str) -> dict[str, Any]:
+        raw_output = stdout.strip()
+        if not raw_output:
+            raise OpenClawClientError("OpenClaw returned no output.")
+
+        direct_response = cls._coerce_command_response(raw_output)
+        if direct_response is not None:
+            return direct_response
+
+        json_objects = cls._parse_json_objects(raw_output)
+
+        for candidate in reversed(json_objects):
+            direct_response = cls._coerce_command_response(candidate)
+            if direct_response is not None:
+                return direct_response
+
+        for envelope in reversed(json_objects):
+            try:
+                payload_text = cls._extract_text_payload(envelope)
+            except OpenClawClientError:
+                continue
+
+            direct_response = cls._coerce_command_response(payload_text)
+            if direct_response is not None:
+                return direct_response
+
+        raise OpenClawClientError("OpenClaw returned no parseable command response.")
+
+    @staticmethod
+    def _summarize_failure_output(stderr: str, stdout: str) -> str:
+        combined = "\n".join(part.strip() for part in (stderr, stdout) if part and part.strip())
+        if not combined:
+            return "OpenClaw agent failed."
+
+        summaries: list[str] = []
+
+        if "duplicate plugin id detected" in combined:
+            summaries.append("OpenClaw has duplicate `rosclaw` plugins configured.")
+        if "plugins.allow is empty" in combined:
+            summaries.append("OpenClaw is auto-loading untrusted plugins because `plugins.allow` is empty.")
+        if "gateway timeout" in combined:
+            summaries.append("OpenClaw gateway timed out before it could send the command.")
+        if "session file locked" in combined:
+            summaries.append("OpenClaw session is locked by another process or request.")
+
+        if summaries:
+            return " ".join(dict.fromkeys(summaries))
+
+        return combined
+
+    @classmethod
+    def _parse_json_objects(cls, raw_output: str) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+
+        def append_candidate(value: Any) -> None:
+            if isinstance(value, dict):
+                candidates.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    append_candidate(item)
+
         try:
-            return json.loads(self._extract_json(payload_text))
-        except json.JSONDecodeError as exc:
-            raise OpenClawClientError(f"OpenClaw returned malformed JSON payload: {exc}") from exc
+            append_candidate(json.loads(raw_output))
+        except json.JSONDecodeError:
+            pass
+
+        for line in raw_output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                append_candidate(json.loads(stripped))
+            except json.JSONDecodeError:
+                continue
+
+        return candidates
+
+    @classmethod
+    def _coerce_command_response(cls, value: Any) -> dict[str, Any] | None:
+        payload: Any = value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                try:
+                    payload = json.loads(cls._extract_json(stripped))
+                except (json.JSONDecodeError, OpenClawClientError):
+                    return None
+
+        if not isinstance(payload, dict):
+            return None
+        if "ok" not in payload or "summary" not in payload:
+            return None
+        return payload
 
     @staticmethod
     def _extract_text_payload(envelope: dict[str, Any]) -> str:
         result = envelope.get("result") or {}
-        payloads = result.get("payloads") or []
+        payloads = result.get("payloads") or envelope.get("payloads") or []
         texts = [payload.get("text", "") for payload in payloads if isinstance(payload, dict)]
         joined = "\n".join(text.strip() for text in texts if text and text.strip())
         if joined:
             return joined
+        for key in ("text", "output_text", "message"):
+            candidate = envelope.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+            candidate = result.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
         summary = envelope.get("summary")
         if isinstance(summary, str) and summary.strip():
             return summary
