@@ -26,27 +26,32 @@ class OpenClawClient:
         prompt = f"""
 You are controlling a Booster K1 mobile robot through OpenClaw with ROS access.
 
-Send exactly one navigation goal in the `{frame}` frame to:
+Decide whether the robot should send exactly one navigation goal in the `{frame}` frame to:
 - x: {x:.3f}
 - y: {y:.3f}
 - z: {z:.3f}
 
+Confirmed backend context:
+- The bridge has already verified that Nav2 is running and that `/navigate_to_pose` is available.
+- The bridge will send the actual action goal after you respond.
+
 Rules:
-- Use the existing `navigate-to` skill if it is available.
 - The navigation path must go through Nav2 using the `/navigate_to_pose` action and the `nav2_msgs/action/NavigateToPose` type.
-- If you cannot use the skill, call `ros2_action_goal` directly with that exact action name and action type.
+- You are only making the navigation decision for the operator-visible trace.
+- Treat Nav2 transport availability as already confirmed for this request.
+- Do not call ROS tools, services, or actions yourself for this request.
 - Do not use raw velocity control for this request.
 - Do not use roaming or autonomy-mode services for this one-off destination.
-- If navigation is unavailable, fail instead of improvising.
+- Only fail if the request itself should not be executed.
 - Return an operator-visible decision trace in the JSON so the visionOS app can show what you chose.
 
 Return ONLY JSON:
 {{
   "ok": true,
-  "summary": "navigation goal sent",
+  "summary": "navigation approved",
   "decision": {{
     "skill": "navigate-to",
-    "tool": "ros2_action_goal",
+    "tool": "bridge_nav2_action_goal",
     "action": "/navigate_to_pose",
     "action_type": "nav2_msgs/action/NavigateToPose",
     "frame": "{frame}"
@@ -58,9 +63,9 @@ Return ONLY JSON:
       "detail": "Using the navigate-to workflow for the requested floor target."
     }},
     {{
-      "role": "tool",
-      "summary": "Sent /navigate_to_pose goal.",
-      "detail": "Target: ({x:.3f}, {y:.3f}, {z:.3f}) in {frame}."
+      "role": "assistant",
+      "summary": "Approved Nav2 execution.",
+      "detail": "The backend bridge should send /navigate_to_pose for ({x:.3f}, {y:.3f}, {z:.3f}) in {frame}."
     }}
   ],
   "goal": {{"frame":"{frame}","x":{x:.3f},"y":{y:.3f},"z":{z:.3f}}}
@@ -72,7 +77,7 @@ Failure JSON:
   "summary": "navigation goal failed",
   "decision": {{
     "skill": "navigate-to",
-    "tool": "ros2_action_goal",
+    "tool": "bridge_nav2_action_goal",
     "action": "/navigate_to_pose",
     "action_type": "nav2_msgs/action/NavigateToPose",
     "frame": "{frame}"
@@ -81,7 +86,7 @@ Failure JSON:
     {{
       "role": "assistant",
       "summary": "Navigation could not be started.",
-      "detail": "State briefly whether Nav2 was unavailable, the action goal was rejected, or another navigation precondition failed."
+      "detail": "State briefly why the requested move should not be executed."
     }}
   ],
   "goal": null

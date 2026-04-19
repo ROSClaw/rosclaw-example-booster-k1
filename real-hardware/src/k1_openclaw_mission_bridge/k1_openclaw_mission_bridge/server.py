@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 import rclpy
+from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -28,6 +29,16 @@ MODE_NAMES = {
     AutonomyMode.SUPERVISED_AUTONOMY: "SUPERVISED_AUTONOMY",
     AutonomyMode.FULL_AUTONOMY: "FULL_AUTONOMY",
     AutonomyMode.IDLE_ROAM: "IDLE_ROAM",
+}
+
+GOAL_STATUS_LABELS = {
+    GoalStatus.STATUS_UNKNOWN: "unknown",
+    GoalStatus.STATUS_ACCEPTED: "accepted",
+    GoalStatus.STATUS_EXECUTING: "executing",
+    GoalStatus.STATUS_CANCELING: "canceling",
+    GoalStatus.STATUS_SUCCEEDED: "succeeded",
+    GoalStatus.STATUS_CANCELED: "canceled",
+    GoalStatus.STATUS_ABORTED: "aborted",
 }
 
 
@@ -140,6 +151,7 @@ class K1MissionBridgeNode(Node):
         self._reports: list[dict[str, Any]] = []
         self._agent_activity: list[dict[str, Any]] = []
         self._last_alignment: dict[str, Any] | None = None
+        self._nav2_futures: list[Any] = []
 
         self._spatial_publisher = self.create_publisher(
             String,
@@ -349,7 +361,7 @@ class K1MissionBridgeNode(Node):
                 frame,
             ),
             accepted_summary=accepted_summary,
-            on_success=lambda result: self._store_successful_goal(
+            on_success=lambda result: self._dispatch_nav2_goal(
                 result,
                 frame,
                 goal_position,
@@ -587,6 +599,185 @@ class K1MissionBridgeNode(Node):
             }
             if requested_position is not None:
                 self._last_goal["requested_position"] = requested_position
+
+    def _dispatch_nav2_goal(
+        self,
+        result: dict[str, Any],
+        frame: str,
+        goal_position: dict[str, float],
+        requested_position: dict[str, float] | None = None,
+    ) -> None:
+        decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+        action_name = str(decision.get("action", "/navigate_to_pose"))
+        if action_name != "/navigate_to_pose":
+            self._append_agent_activity(
+                role="assistant",
+                summary="OpenClaw returned a non-Nav2 decision.",
+                detail=(
+                    f"Expected /navigate_to_pose, but the agent requested {action_name}. "
+                    "The backend did not send a goal."
+                ),
+                status="error",
+            )
+            return
+
+        self._store_successful_goal(result, frame, goal_position, requested_position=requested_position)
+
+        if not self._nav2_ready():
+            self._append_agent_activity(
+                role="tool",
+                summary="Nav2 action transport is unavailable.",
+                detail="The bridge could not send /navigate_to_pose because the backend action client is not ready.",
+                status="error",
+            )
+            self._update_last_goal_summary("Nav2 action transport unavailable")
+            return
+
+        nav_goal = NavigateToPose.Goal()
+        nav_goal.pose.header.frame_id = frame
+        nav_goal.pose.header.stamp = self.get_clock().now().to_msg()
+        nav_goal.pose.pose.position.x = goal_position["x"]
+        nav_goal.pose.pose.position.y = goal_position["y"]
+        nav_goal.pose.pose.position.z = goal_position["z"]
+        goal_yaw = self._goal_yaw_for_target(frame, goal_position)
+        nav_goal.pose.pose.orientation.z = math.sin(goal_yaw / 2.0)
+        nav_goal.pose.pose.orientation.w = math.cos(goal_yaw / 2.0)
+
+        self._append_agent_activity(
+            role="tool",
+            summary="Dispatching /navigate_to_pose goal.",
+            detail=(
+                f"Sending target ({goal_position['x']:.3f}, {goal_position['y']:.3f}, {goal_position['z']:.3f}) "
+                f"in {frame} through the bridge Nav2 action client."
+            ),
+            status="pending",
+        )
+
+        try:
+            send_future = self._nav2_client.send_goal_async(nav_goal)
+        except Exception as exc:  # pragma: no cover - ROS transport guard
+            self._append_agent_activity(
+                role="tool",
+                summary="Failed to send /navigate_to_pose goal.",
+                detail=str(exc),
+                status="error",
+            )
+            self._update_last_goal_summary("Nav2 goal send failed")
+            return
+
+        self._remember_nav2_future(send_future)
+        send_future.add_done_callback(
+            lambda future: self._on_nav2_goal_response(future, frame, goal_position)
+        )
+
+    def _goal_yaw_for_target(self, frame: str, goal_position: dict[str, float]) -> float:
+        with self._lock:
+            robot_pose = dict(self._robot_pose) if self._robot_pose else None
+
+        if not robot_pose or str(robot_pose.get("frame", "")) != frame:
+            return 0.0
+
+        robot_position = robot_pose.get("position") or {}
+        dx = goal_position["x"] - float(robot_position.get("x", 0.0))
+        dy = goal_position["y"] - float(robot_position.get("y", 0.0))
+        if math.hypot(dx, dy) <= 1e-6:
+            return float(robot_pose.get("yaw_radians", 0.0))
+        return math.atan2(dy, dx)
+
+    def _on_nav2_goal_response(
+        self,
+        future,
+        frame: str,
+        goal_position: dict[str, float],
+    ) -> None:
+        self._forget_nav2_future(future)
+        try:
+            goal_handle = future.result()
+        except Exception as exc:  # pragma: no cover - ROS transport guard
+            self._append_agent_activity(
+                role="tool",
+                summary="Nav2 goal transport failed.",
+                detail=str(exc),
+                status="error",
+            )
+            self._update_last_goal_summary("Nav2 goal transport failed")
+            return
+
+        if not goal_handle.accepted:
+            self._append_agent_activity(
+                role="tool",
+                summary="Nav2 rejected the goal.",
+                detail=(
+                    f"/navigate_to_pose rejected ({goal_position['x']:.3f}, {goal_position['y']:.3f}, "
+                    f"{goal_position['z']:.3f}) in {frame}."
+                ),
+                status="error",
+            )
+            self._update_last_goal_summary("Nav2 goal rejected")
+            return
+
+        self._append_agent_activity(
+            role="tool",
+            summary="Sent /navigate_to_pose goal.",
+            detail=(
+                f"Nav2 accepted ({goal_position['x']:.3f}, {goal_position['y']:.3f}, {goal_position['z']:.3f}) "
+                f"in {frame}."
+            ),
+            status="success",
+        )
+        self._update_last_goal_summary("Nav2 goal accepted")
+
+        result_future = goal_handle.get_result_async()
+        self._remember_nav2_future(result_future)
+        result_future.add_done_callback(self._on_nav2_goal_result)
+
+    def _on_nav2_goal_result(self, future) -> None:
+        self._forget_nav2_future(future)
+        try:
+            result = future.result()
+        except Exception as exc:  # pragma: no cover - ROS transport guard
+            self._append_agent_activity(
+                role="tool",
+                summary="Nav2 result tracking failed.",
+                detail=str(exc),
+                status="error",
+            )
+            self._update_last_goal_summary("Nav2 result unavailable")
+            return
+
+        status_code = int(getattr(result, "status", GoalStatus.STATUS_UNKNOWN))
+        status_label = GOAL_STATUS_LABELS.get(status_code, f"status_{status_code}")
+
+        if status_code == GoalStatus.STATUS_SUCCEEDED:
+            self._append_agent_activity(
+                role="assistant",
+                summary="Navigation goal succeeded.",
+                detail="Nav2 reported the tapped destination as reached.",
+                status="success",
+            )
+            self._update_last_goal_summary("Nav2 goal succeeded")
+            return
+
+        self._append_agent_activity(
+            role="assistant",
+            summary="Navigation goal finished without success.",
+            detail=f"Nav2 reported {status_label} for the most recent tapped destination.",
+            status="error",
+        )
+        self._update_last_goal_summary(f"Nav2 goal {status_label}")
+
+    def _remember_nav2_future(self, future: Any) -> None:
+        with self._lock:
+            self._nav2_futures.append(future)
+
+    def _forget_nav2_future(self, future: Any) -> None:
+        with self._lock:
+            self._nav2_futures = [item for item in self._nav2_futures if item is not future]
+
+    def _update_last_goal_summary(self, summary: str) -> None:
+        with self._lock:
+            if self._last_goal is not None:
+                self._last_goal["summary"] = summary
 
     def _store_successful_report(self, result: dict[str, Any]) -> None:
         report = result.get("report") or {}
