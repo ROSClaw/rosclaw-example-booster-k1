@@ -76,6 +76,23 @@ external submodule and, when `rosclaw_autonomy` is built in the local
 `real-hardware` overlay, starts `rosclaw_autonomy` a few seconds after
 `rosclaw_bringup`.
 
+When the visionOS backend is enabled, the bringup script now also prints a
+small OpenClaw preflight summary so duplicate plugin IDs, an empty
+`plugins.allow`, or an unhealthy gateway are visible before the app starts
+timing out.
+
+To probe the backend from the host that is actually serving visionOS requests:
+
+```bash
+python3 ./real-hardware/probe_visionos_backend.py --base-url http://192.168.2.126:8088
+```
+
+Useful overrides for that bringup path include:
+
+- `VISIONOS_OPENCLAW_AGENT_ID`
+- `VISIONOS_OPENCLAW_SESSION_ID`
+- `VISIONOS_OPENCLAW_TIMEOUT_SECONDS`
+
 Build the local real-hardware overlay with autonomy on top of the existing
 `rosclaw-ros2` install:
 

@@ -137,17 +137,26 @@ Failure JSON:
             str(self.timeout_seconds),
         ]
 
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            message = self._summarize_failure_output(completed.stderr, completed.stdout)
-            raise OpenClawClientError(message)
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+            if completed.returncode != 0:
+                message = self._summarize_failure_output(completed.stderr, completed.stdout)
+                raise OpenClawClientError(message)
 
-        return self._decode_response_output(completed.stdout)
+            return self._decode_response_output(completed.stdout)
+        except subprocess.TimeoutExpired as exc:
+            partial_stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            partial_stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            summary = self._summarize_failure_output(partial_stderr, partial_stdout)
+            if summary == "OpenClaw agent failed.":
+                summary = f"OpenClaw command timed out after {self.timeout_seconds}s."
+            raise OpenClawClientError(summary) from exc
 
     @classmethod
     def _decode_response_output(cls, stdout: str) -> dict[str, Any]:

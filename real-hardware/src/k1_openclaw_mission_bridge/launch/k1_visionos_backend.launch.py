@@ -10,6 +10,7 @@ def generate_launch_description() -> LaunchDescription:
     openclaw_agent_id = LaunchConfiguration("openclaw_agent_id")
     openclaw_session_id = LaunchConfiguration("openclaw_session_id")
     openclaw_binary = LaunchConfiguration("openclaw_binary")
+    openclaw_timeout_seconds = LaunchConfiguration("openclaw_timeout_seconds")
     enable_openclaw = LaunchConfiguration("enable_openclaw")
 
     return LaunchDescription(
@@ -19,6 +20,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("openclaw_agent_id", default_value="main"),
             DeclareLaunchArgument("openclaw_session_id", default_value="k1-visionos"),
             DeclareLaunchArgument("openclaw_binary", default_value="openclaw"),
+            DeclareLaunchArgument("openclaw_timeout_seconds", default_value="10"),
             DeclareLaunchArgument("enable_openclaw", default_value="true"),
             Node(
                 package="k1_visionos_rtabmap_bridge",
@@ -38,6 +40,7 @@ def generate_launch_description() -> LaunchDescription:
                         "openclaw_agent_id": openclaw_agent_id,
                         "openclaw_session_id": openclaw_session_id,
                         "openclaw_binary": openclaw_binary,
+                        "openclaw_timeout_seconds": openclaw_timeout_seconds,
                         "enable_openclaw": enable_openclaw,
                     }
                 ],

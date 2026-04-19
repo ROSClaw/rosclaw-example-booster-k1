@@ -344,48 +344,12 @@ private struct ImmersiveWorkflowHUD: View {
             Text("Fusion: \(appModel.fusionConfidenceDescription)")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-
-            controls
         }
         .padding(16)
-        .frame(maxWidth: 640, alignment: .leading)
+        .frame(maxWidth: 460, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .padding(.horizontal, 24)
         .padding(.top, 24)
-    }
-
-    @ViewBuilder
-    private var controls: some View {
-        HStack(spacing: 10) {
-            if appModel.canMarkRobotAnchor {
-                Button("Mark Robot") {
-                    appModel.markRobotAnchorFromReticle()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            if appModel.canRotatePreview {
-                Button("Rotate Left") {
-                    appModel.adjustAlignmentYaw(byDegrees: -10.0)
-                }
-
-                Button("Rotate Right") {
-                    appModel.adjustAlignmentYaw(byDegrees: 10.0)
-                }
-
-                Button("Align") {
-                    Task { await appModel.alignHeadsetToRobotPose() }
-                }
-                .buttonStyle(.borderedProminent)
-            }
-
-            if appModel.hasRobotAnchor || appModel.isAligned {
-                Button("Reset") {
-                    appModel.resetAlignmentCalibration()
-                }
-            }
-        }
-        .font(.footnote)
     }
 }
 

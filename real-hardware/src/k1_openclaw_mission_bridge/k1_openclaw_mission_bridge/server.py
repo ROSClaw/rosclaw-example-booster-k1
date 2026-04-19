@@ -106,7 +106,7 @@ class K1MissionBridgeNode(Node):
         self.declare_parameter("openclaw_binary", "openclaw")
         self.declare_parameter("openclaw_agent_id", "main")
         self.declare_parameter("openclaw_session_id", "k1-visionos")
-        self.declare_parameter("openclaw_timeout_seconds", 45)
+        self.declare_parameter("openclaw_timeout_seconds", 10)
         self.declare_parameter("enable_openclaw", True)
         self.declare_parameter("spatial_observation_topic", "/visionos/spatial_observation")
         self.declare_parameter("alignment_topic", "/visionos/alignment")

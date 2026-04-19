@@ -21,6 +21,14 @@ struct ContentView: View {
         .task {
             await appModel.startIfNeeded()
         }
+        .safeAreaInset(edge: .bottom) {
+            if appModel.immersiveSpaceState == .open,
+               appModel.canMarkRobotAnchor || appModel.canRotatePreview || appModel.hasRobotAnchor || appModel.isAligned {
+                alignmentDock
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+            }
+        }
     }
 
     private var workflowSection: some View {
@@ -92,7 +100,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 } else if appModel.canSendTapGoal {
-                    Label("Point and pinch once", systemImage: "hand.tap")
+                    Label("Aim right, left-pinch once", systemImage: "hand.tap")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -115,11 +123,84 @@ struct ContentView: View {
 
             if appModel.immersiveSpaceState == .open,
                (appModel.canMarkRobotAnchor || (appModel.hasRobotAnchor && !appModel.isAligned)) {
-                Text("Use the floating immersive HUD for Mark Robot, Rotate, and Align so you can keep the robot in view.")
+                Text("Use the alignment dock at the bottom of this window for Mark Robot, Rotate, and Align while keeping the robot in view.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var alignmentDock: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(alignmentDockTitle)
+                .font(.headline)
+
+            Text(alignmentDockDetail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                if appModel.canMarkRobotAnchor {
+                    Button("Mark Robot") {
+                        appModel.markRobotAnchorFromReticle()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if appModel.canRotatePreview {
+                    Button("Rotate Left") {
+                        appModel.adjustAlignmentYaw(byDegrees: -10.0)
+                    }
+
+                    Button("Rotate Right") {
+                        appModel.adjustAlignmentYaw(byDegrees: 10.0)
+                    }
+
+                    Button("Align") {
+                        Task { await appModel.alignHeadsetToRobotPose() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if appModel.hasRobotAnchor || appModel.isAligned {
+                    Button("Reset") {
+                        appModel.resetAlignmentCalibration()
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private var alignmentDockTitle: String {
+        if appModel.canMarkRobotAnchor {
+            return "Mark Robot Position"
+        }
+        if appModel.canRotatePreview {
+            return "Preview Alignment"
+        }
+        if appModel.isAligned {
+            return "Alignment Locked"
+        }
+        return "Alignment"
+    }
+
+    private var alignmentDockDetail: String {
+        if appModel.canMarkRobotAnchor {
+            return "Aim the right-hand ray at the real robot's feet, then left-pinch or press Mark Robot."
+        }
+        if appModel.canRotatePreview {
+            return String(
+                format: "Rotate the cyan preview until it sits on the real robot, then align. Current yaw trim %.0f°.",
+                appModel.yawCalibrationDegrees
+            )
+        }
+        if appModel.isAligned {
+            return "The headset and robot map are aligned. Use Reset if you need to recalibrate."
+        }
+        return "Alignment controls are available while immersive mode is open."
     }
 
     private var header: some View {
@@ -277,7 +358,7 @@ struct ContentView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
-            Text("The hand ray drives the floor reticle and the pinch action. Mark the robot first, trim the preview until it lines up, align, then pinch once to send each move request.")
+            Text("The right hand drives the floor ray target while the left-hand pinch confirms it. Mark the robot first, trim the preview until it lines up, align, then left-pinch once to send each move request.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

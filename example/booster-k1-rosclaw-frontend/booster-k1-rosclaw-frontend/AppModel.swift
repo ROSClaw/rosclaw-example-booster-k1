@@ -200,7 +200,7 @@ final class AppModel {
         if let point = pointerWorldPoint {
             return String(
                 format: "%@ ray hit: x %.2f  y %.2f  z %.2f",
-                (pointerSource == .hand ? "Hand-ray" : "Head-ray"),
+                (pointerSource == .hand ? "Right-hand ray" : "Head-ray"),
                 point.x,
                 point.y,
                 point.z
@@ -216,12 +216,12 @@ final class AppModel {
             return "Reticle will appear after the app detects the floor."
         }
         if !hasRobotAnchor {
-            return "Use the hand ray to place the floor target on the robot's feet, then mark that spot."
+            return "Aim with your right hand until the floor target sits on the robot's feet, then left-pinch to mark that spot."
         }
         if !isAligned {
             return "The raycast target is live. Rotate the robot preview until it sits on the real robot, then align."
         }
-        return "Point your hand lower toward the floor to place the raycast target."
+        return "Aim with your right hand and use a left-hand pinch to confirm the floor target."
     }
 
     var fusionConfidenceDescription: String {
@@ -265,7 +265,7 @@ final class AppModel {
         if let lastError, isTimeoutError(lastError) {
             return "The backend is timing out"
         }
-        return "Aim with your hand ray and pinch once to move"
+        return "Aim with your right hand and left-pinch once to move"
     }
 
     var operatorDetail: String {
@@ -282,7 +282,7 @@ final class AppModel {
             return "Look down at the ground and slowly pan across the room so plane detection can classify the floor."
         }
         if !hasRobotAnchor {
-            return "Point at the robot's feet until the floor target sits under the real robot, then press Mark Robot Position. The orange operator marker should follow you continuously while the ray beam connects your hand to the floor target."
+            return "Point your right hand at the robot's feet until the floor target sits under the real robot, then left-pinch or press Mark Robot Position. The orange operator marker should follow you continuously while the ray beam connects your right hand to the floor target."
         }
         if !isAligned {
             return "The cyan robot marker is a live preview. Nudge it left or right until it overlays the real robot, then commit the alignment."
@@ -290,7 +290,7 @@ final class AppModel {
         if isSendingGoal {
             return "The current reticle target has been sent. The app is temporarily blocking repeated goal requests until the backend responds."
         }
-        return "The cyan hand ray shows the target floor point. Pinch with pointer finger and thumb once, then wait for the command summary before sending another move."
+        return "The cyan right-hand ray shows the target floor point. Left-pinch once to send it, then wait for the command summary before sending another move."
     }
 
     var workflowSteps: [WorkflowStep] {
@@ -320,7 +320,7 @@ final class AppModel {
                     ? "Robot anchor locked on the floor."
                     : (backendState.robotPose == nil
                         ? "Waiting for a robot pose from the backend."
-                        : "Aim the reticle at the robot's feet and press Mark Robot Position."),
+                        : "Aim the right-hand ray at the robot's feet and left-pinch or press Mark Robot Position."),
                 status: hasRobotAnchor ? .complete : (hasFloorEstimate ? .active : .pending)
             ),
             WorkflowStep(
@@ -335,7 +335,7 @@ final class AppModel {
             ),
             WorkflowStep(
                 id: "move",
-                title: "Aim reticle and pinch once",
+                title: "Aim right hand and left-pinch once",
                 detail: isSendingGoal
                     ? "Move request in flight. Additional taps are blocked until it finishes."
                     : (canSendTapGoal
@@ -453,7 +453,7 @@ final class AppModel {
         robotAnchorWorldPoint = pointerWorldPoint
         yawCalibrationOffsetRadians = 0.0
         lastError = nil
-        lastCommandSummary = "Robot floor anchor captured from the live reticle."
+        lastCommandSummary = "Robot floor anchor captured from the right-hand ray target."
         refreshSceneState()
     }
 
@@ -578,7 +578,7 @@ final class AppModel {
             return
         }
 
-        if let handPointer = spatial.latestHandPointer,
+        if let handPointer = spatial.latestRightHandPointer,
            let floorPoint = floorIntersectionPoint(
                origin: handPointer.pinchMidpointWorld,
                direction: handPointer.directionWorld,
@@ -666,11 +666,10 @@ final class AppModel {
     }
 
     private func processPinchGestureIfNeeded() {
-        guard pointerSource == .hand,
-              canSendTapGoal,
-              let handPointer = spatial.latestHandPointer,
+        guard let leftHandPointer = spatial.latestLeftHandPointer,
+              leftHandPointer.pinchDistance < 0.030,
               let pointerWorldPoint,
-              handPointer.pinchDistance < 0.030
+              (canMarkRobotAnchor || canSendTapGoal)
         else {
             return
         }
@@ -679,6 +678,12 @@ final class AppModel {
         guard now.timeIntervalSince(lastPinchSubmissionDate) > 1.0 else { return }
         lastPinchSubmissionDate = now
 
+        if canMarkRobotAnchor {
+            markRobotAnchorFromReticle()
+            return
+        }
+
+        guard canSendTapGoal else { return }
         Task { await sendGroundTap(worldPoint: pointerWorldPoint) }
     }
 

@@ -68,15 +68,12 @@ final class SpatialMappingSession {
         }
     }
 
-    var latestHandPointer: HandPointerSample? {
-        let candidates = [rightHandPointer, leftHandPointer].compactMap { $0 }
-        guard !candidates.isEmpty else { return nil }
-        return candidates.min { lhs, rhs in
-            if abs(lhs.pinchDistance - rhs.pinchDistance) > 0.015 {
-                return lhs.pinchDistance < rhs.pinchDistance
-            }
-            return lhs.chirality == .right && rhs.chirality == .left
-        }
+    var latestRightHandPointer: HandPointerSample? {
+        rightHandPointer
+    }
+
+    var latestLeftHandPointer: HandPointerSample? {
+        leftHandPointer
     }
 
     private func configureSession() async {

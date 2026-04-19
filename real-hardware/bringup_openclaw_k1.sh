@@ -34,6 +34,7 @@ AUTONOMY_START_DELAY_SEC="${AUTONOMY_START_DELAY_SEC:-3}"
 VISIONOS_BACKEND_PORT="${VISIONOS_BACKEND_PORT:-8088}"
 VISIONOS_OPENCLAW_AGENT_ID="${VISIONOS_OPENCLAW_AGENT_ID:-main}"
 VISIONOS_OPENCLAW_SESSION_ID="${VISIONOS_OPENCLAW_SESSION_ID:-${VISIONOS_OPENCLAW_SESSION_KEY:-k1-visionos}}"
+VISIONOS_OPENCLAW_TIMEOUT_SECONDS="${VISIONOS_OPENCLAW_TIMEOUT_SECONDS:-10}"
 ROSCLAW_REPO_CONFIG_ROOT_DEFAULT="${SCRIPT_DIR}/src/k1_cmd_vel_bridge/config"
 STEREO_STREAM_HOST="${K1_STEREO_STREAM_HOST:-}"
 STEREO_STREAM_PORT="${K1_STEREO_STREAM_PORT:-5600}"
@@ -86,10 +87,14 @@ Options:
   --visionos-backend-port PORT
                             HTTP port for the visionOS backend.
                             Default: ${VISIONOS_BACKEND_PORT}
+  Environment override: VISIONOS_OPENCLAW_AGENT_ID
+                        Default: ${VISIONOS_OPENCLAW_AGENT_ID}
   --stereo-stream-port PORT TCP port for robot stereo camera transport.
                             Default: ${STEREO_STREAM_PORT}
   Environment override: VISIONOS_OPENCLAW_SESSION_ID
                         Falls back to legacy VISIONOS_OPENCLAW_SESSION_KEY.
+  Environment override: VISIONOS_OPENCLAW_TIMEOUT_SECONDS
+                        Default: ${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}
   --force-local-host-build
                             Rebuild relevant local host packages in
                             real-hardware before launching.
@@ -123,6 +128,43 @@ die() {
   exit 1
 }
 
+warn_openclaw_preflight() {
+  if [[ "${ENABLE_VISIONOS_BACKEND}" != "true" ]]; then
+    return 0
+  fi
+
+  local openclaw_bin
+  openclaw_bin="$(command -v openclaw 2>/dev/null || true)"
+  if [[ -z "${openclaw_bin}" ]]; then
+    log "OpenClaw CLI is not on PATH. The visionOS backend will accept HTTP requests, but OpenClaw commands will fail until the CLI is installed and reachable."
+    return 0
+  fi
+
+  log "visionOS backend OpenClaw settings: agent_id=${VISIONOS_OPENCLAW_AGENT_ID} session_id=${VISIONOS_OPENCLAW_SESSION_ID} timeout=${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}s"
+
+  local validate_output=""
+  if ! validate_output="$("${openclaw_bin}" config validate 2>&1)"; then
+    log "OpenClaw config validation reported issues:"
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log "  ${line}"
+    done <<< "${validate_output}"
+  elif [[ -n "${validate_output}" ]]; then
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log "OpenClaw validate: ${line}"
+    done <<< "${validate_output}"
+  fi
+
+  if grep -q "duplicate plugin id detected" <<< "${validate_output}"; then
+    log "OpenClaw appears to have duplicate plugin IDs configured. Remove the extra `rosclaw` install or extension before trusting visionOS commands."
+  fi
+  if grep -q "plugins.allow is empty" <<< "${validate_output}"; then
+    log "OpenClaw is auto-loading plugins because \`plugins.allow\` is empty. Pin the trusted plugin IDs to avoid ambiguous backend behavior."
+  fi
+  if ! "${openclaw_bin}" gateway health >/dev/null 2>&1; then
+    log "OpenClaw gateway health check failed. VisionOS backend requests will likely time out until the gateway is healthy."
+  fi
+}
+
 run_cmd() {
   if [[ "${DRY_RUN}" == "true" ]]; then
     printf '[dry-run] '
@@ -152,6 +194,36 @@ source_compat() {
   if [[ "${restore_nounset}" == "1" ]]; then
     set -u
   fi
+}
+
+source_local_real_hardware_overlay() {
+  local local_ws="${SCRIPT_DIR}"
+  local top_level_setup="${local_ws}/install/local_setup.bash"
+  local package_name=""
+  local package_setup=""
+
+  if [[ -f "${top_level_setup}" ]]; then
+    source_compat "${top_level_setup}"
+    return 0
+  fi
+
+  for package_name in \
+    booster_interface \
+    rosclaw_autonomy_msgs \
+    k1_cmd_vel_bridge \
+    rosclaw_autonomy \
+    k1_low_level_relay \
+    k1_openclaw_mission_bridge \
+    k1_visionos_rtabmap_bridge
+  do
+    package_setup="${local_ws}/install/${package_name}/share/${package_name}/local_setup.bash"
+    if [[ ! -f "${package_setup}" ]]; then
+      package_setup="${local_ws}/install/${package_name}/share/${package_name}/package.bash"
+    fi
+    if [[ -f "${package_setup}" ]]; then
+      source_compat "${package_setup}"
+    fi
+  done
 }
 
 reset_ros_overlay_env() {
@@ -245,6 +317,7 @@ source_local_host_env() {
   source_compat "${LOCAL_DDS_SETUP}" >/tmp/rosclaw-dds-env.log
   unset ROSCLAW_DDS_SKIP_ROSCLAW_OVERLAY
   source_compat "${ROSCLAW_SETUP_BASH}"
+  source_local_real_hardware_overlay
   export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
   export ROS_LOG_DIR
 }
@@ -668,6 +741,7 @@ if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
     if ! package_available k1_visionos_rtabmap_bridge; then
       die "k1_visionos_rtabmap_bridge is not available in the sourced overlays. Build the real-hardware workspace."
     fi
+    warn_openclaw_preflight
   fi
   if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
     if ! package_available k1_low_level_relay; then
@@ -705,6 +779,7 @@ VISIONOS_BACKEND_COMMAND=(
   "port:=${VISIONOS_BACKEND_PORT}"
   "openclaw_agent_id:=${VISIONOS_OPENCLAW_AGENT_ID}"
   "openclaw_session_id:=${VISIONOS_OPENCLAW_SESSION_ID}"
+  "openclaw_timeout_seconds:=${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}"
 )
 
 CAMERA_STREAM_CLIENT_COMMAND=(
