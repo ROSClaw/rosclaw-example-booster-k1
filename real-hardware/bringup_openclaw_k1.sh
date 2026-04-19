@@ -324,6 +324,12 @@ source_local_host_env() {
 
 package_available() {
   local package_name="$1"
+  if [[ "${package_name}" == "rosclaw_autonomy_msgs" ]]; then
+    python3 - <<'PY' >/dev/null 2>&1
+from rosclaw_autonomy_msgs.msg import AutonomyMode, RobotBelief
+PY
+    return $?
+  fi
   ros2 pkg prefix "${package_name}" >/dev/null 2>&1
 }
 

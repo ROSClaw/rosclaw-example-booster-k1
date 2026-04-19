@@ -93,6 +93,14 @@ Useful overrides for that bringup path include:
 - `VISIONOS_OPENCLAW_SESSION_ID`
 - `VISIONOS_OPENCLAW_TIMEOUT_SECONDS`
 
+For a quick autonomy message sanity check after sourcing the overlay, prefer a
+real import over `ros2 pkg prefix`:
+
+```bash
+python3 -c "from rosclaw_autonomy_msgs.msg import AutonomyMode, RobotBelief"
+ros2 pkg prefix rosclaw_autonomy
+```
+
 Build the local real-hardware overlay with autonomy on top of the existing
 `rosclaw-ros2` install:
 
