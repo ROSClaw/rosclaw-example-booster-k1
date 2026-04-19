@@ -117,7 +117,7 @@ final class AppModel {
     }
 
     var canSendTapGoal: Bool {
-        immersiveSpaceState == .open && isAligned && !isSendingGoal
+        immersiveSpaceState == .open && isAligned && !isSendingGoal && !tapToMoveBlockedByNav2
     }
 
     var canRotatePreview: Bool {
@@ -126,6 +126,14 @@ final class AppModel {
 
     var autonomyEnabled: Bool {
         backendState.autonomy.enabled
+    }
+
+    var nav2Ready: Bool? {
+        backendState.nav2Ready
+    }
+
+    var tapToMoveBlockedByNav2: Bool {
+        nav2Ready == false
     }
 
     var liveOperatorWorldPoint: SIMD3<Float>? {
@@ -259,6 +267,9 @@ final class AppModel {
         if !isAligned {
             return "Rotate the preview, then align"
         }
+        if tapToMoveBlockedByNav2 {
+            return "Start Nav2 on the backend"
+        }
         if isSendingGoal {
             return "Sending the move request"
         }
@@ -286,6 +297,9 @@ final class AppModel {
         }
         if !isAligned {
             return "The cyan robot marker is a live preview. Nudge it left or right until it overlays the real robot, then commit the alignment."
+        }
+        if tapToMoveBlockedByNav2 {
+            return "OpenClaw is ready to decide on moves, but `/navigate_to_pose` is not available on the backend yet. Start the K1 navigation stack before sending floor targets."
         }
         if isSendingGoal {
             return "The current reticle target has been sent. The app is temporarily blocking repeated goal requests until the backend responds."
@@ -336,12 +350,14 @@ final class AppModel {
             WorkflowStep(
                 id: "move",
                 title: "Aim right hand and left-pinch once",
-                detail: isSendingGoal
-                    ? "Move request in flight. Additional taps are blocked until it finishes."
-                    : (canSendTapGoal
-                        ? reticleDescription
-                        : "Tap-to-move unlocks after alignment."),
-                status: isSendingGoal ? .active : (canSendTapGoal ? .active : .pending)
+                detail: tapToMoveBlockedByNav2
+                    ? "Tap-to-move is blocked until the backend reports a live `/navigate_to_pose` action server."
+                    : (isSendingGoal
+                        ? "Move request in flight. Additional taps are blocked until it finishes."
+                        : (canSendTapGoal
+                            ? reticleDescription
+                            : "Tap-to-move unlocks after alignment.")),
+                status: tapToMoveBlockedByNav2 ? .pending : (isSendingGoal ? .active : (canSendTapGoal ? .active : .pending))
             ),
         ]
     }

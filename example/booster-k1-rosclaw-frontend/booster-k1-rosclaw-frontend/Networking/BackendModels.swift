@@ -82,6 +82,7 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
     var lastGoal: GoalState?
     var reports: [ReportItem]
     var agentActivity: [AgentActivityItem]
+    var nav2Ready: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ok
@@ -94,6 +95,7 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         case lastGoal
         case reports
         case agentActivity
+        case nav2Ready
     }
 
     init(
@@ -106,7 +108,8 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         statusSummary: String,
         lastGoal: GoalState?,
         reports: [ReportItem],
-        agentActivity: [AgentActivityItem]
+        agentActivity: [AgentActivityItem],
+        nav2Ready: Bool?
     ) {
         self.ok = ok
         self.connectionState = connectionState
@@ -118,6 +121,7 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         self.lastGoal = lastGoal
         self.reports = reports
         self.agentActivity = agentActivity
+        self.nav2Ready = nav2Ready
     }
 
     init(from decoder: Decoder) throws {
@@ -132,6 +136,7 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         lastGoal = try container.decodeIfPresent(GoalState.self, forKey: .lastGoal)
         reports = try container.decodeIfPresent([ReportItem].self, forKey: .reports) ?? []
         agentActivity = try container.decodeIfPresent([AgentActivityItem].self, forKey: .agentActivity) ?? []
+        nav2Ready = try container.decodeIfPresent(Bool.self, forKey: .nav2Ready)
     }
 
     static let empty = BackendStateResponse(
@@ -149,7 +154,8 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         statusSummary: "No backend state yet.",
         lastGoal: nil,
         reports: [],
-        agentActivity: []
+        agentActivity: [],
+        nav2Ready: nil
     )
 }
 

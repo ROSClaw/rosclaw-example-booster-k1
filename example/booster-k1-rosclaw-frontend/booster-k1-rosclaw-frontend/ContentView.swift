@@ -222,6 +222,11 @@ struct ContentView: View {
             LabeledContent("Gateway state", value: appModel.backendState.connectionState)
             LabeledContent("Intent", value: appModel.backendState.currentIntent)
             LabeledContent("Status", value: appModel.backendState.statusSummary)
+            if appModel.backendState.nav2Ready == false {
+                Text("Tap-to-move is blocked because the backend does not currently have a live `/navigate_to_pose` action server.")
+                    .foregroundStyle(.orange)
+                    .font(.footnote)
+            }
             if let lastError = appModel.lastError {
                 Text(lastError)
                     .foregroundStyle(.red)
@@ -250,6 +255,9 @@ struct ContentView: View {
             }
             LabeledContent("Autonomy mode", value: appModel.backendState.autonomy.mode)
             LabeledContent("Nav state", value: appModel.backendState.autonomy.navState)
+            if let nav2Ready = appModel.backendState.nav2Ready {
+                LabeledContent("Nav2 action", value: nav2Ready ? "ready" : "unavailable")
+            }
             LabeledContent(
                 "Last outcome",
                 value: appModel.backendState.autonomy.lastOutcome.isEmpty ? "None" : appModel.backendState.autonomy.lastOutcome

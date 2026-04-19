@@ -8,11 +8,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import String
 
 from rosclaw_autonomy_msgs.msg import AutonomyMode, RobotBelief
+try:
+    from nav2_msgs.action import NavigateToPose
+except ImportError:  # pragma: no cover - optional dependency
+    NavigateToPose = None
 
 from .openclaw_client import OpenClawClient, OpenClawClientError
 
@@ -154,6 +159,11 @@ class K1MissionBridgeNode(Node):
             self._on_mapping_status,
             10,
         )
+        self._nav2_client = (
+            ActionClient(self, NavigateToPose, "/navigate_to_pose")
+            if NavigateToPose is not None
+            else None
+        )
 
         self._openclaw = OpenClawClient(
             binary=str(self.get_parameter("openclaw_binary").value),
@@ -230,6 +240,7 @@ class K1MissionBridgeNode(Node):
             current_intent = self._current_intent
             openclaw_active_request = self._openclaw_active_request
             openclaw_active_since = self._openclaw_active_since
+            nav2_ready = self._nav2_ready()
 
         status_summary = current_intent
         if openclaw_active_request:
@@ -239,6 +250,11 @@ class K1MissionBridgeNode(Node):
             status_summary = (
                 f"OpenClaw is processing {openclaw_active_request} "
                 f"({elapsed_seconds}s elapsed)."
+            )
+        elif not nav2_ready:
+            status_summary = (
+                "Nav2 /navigate_to_pose is unavailable. "
+                "OpenClaw can decide on moves, but the robot cannot execute tap-to-move until Nav2 is running."
             )
 
         return {
@@ -252,6 +268,7 @@ class K1MissionBridgeNode(Node):
             "last_goal": last_goal,
             "reports": reports,
             "agent_activity": agent_activity,
+            "nav2_ready": nav2_ready,
         }
 
     def handle_alignment(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -281,6 +298,19 @@ class K1MissionBridgeNode(Node):
             "y": float(map_point.get("y", 0.0)),
             "z": float(map_point.get("z", 0.0)),
         }
+        if not self._nav2_ready():
+            summary = (
+                "Nav2 /navigate_to_pose is unavailable on the backend. "
+                "Start the navigation stack before sending tap goals."
+            )
+            self._append_agent_activity(
+                role="assistant",
+                summary="Tap-to-move is unavailable.",
+                detail=summary,
+                status="error",
+            )
+            return {"ok": False, "summary": summary}
+
         self._append_agent_activity(
             role="operator",
             summary="Requested tap-to-move.",
@@ -363,6 +393,9 @@ class K1MissionBridgeNode(Node):
         msg = String()
         msg.data = json.dumps(payload)
         publisher.publish(msg)
+
+    def _nav2_ready(self) -> bool:
+        return self._nav2_client is not None and self._nav2_client.server_is_ready()
 
     def _append_agent_activity(
         self,
