@@ -131,6 +131,7 @@ class K1MissionBridgeNode(Node):
         }
         self._last_goal: dict[str, Any] | None = None
         self._reports: list[dict[str, Any]] = []
+        self._agent_activity: list[dict[str, Any]] = []
         self._last_alignment: dict[str, Any] | None = None
 
         self._spatial_publisher = self.create_publisher(
@@ -224,6 +225,7 @@ class K1MissionBridgeNode(Node):
             mapping = dict(self._mapping)
             last_goal = dict(self._last_goal) if self._last_goal else None
             reports = list(self._reports)
+            agent_activity = list(self._agent_activity)
             current_intent = self._current_intent
 
         return {
@@ -236,6 +238,7 @@ class K1MissionBridgeNode(Node):
             "status_summary": current_intent,
             "last_goal": last_goal,
             "reports": reports,
+            "agent_activity": agent_activity,
         }
 
     def handle_alignment(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -260,6 +263,16 @@ class K1MissionBridgeNode(Node):
     def handle_tap_goal(self, payload: dict[str, Any]) -> dict[str, Any]:
         map_point = payload.get("map_point") or {}
         frame = str(payload.get("frame", "map"))
+        self._append_agent_activity(
+            role="operator",
+            summary="Requested tap-to-move.",
+            detail=(
+                f"Target floor point: ({float(map_point.get('x', 0.0)):.3f}, "
+                f"{float(map_point.get('y', 0.0)):.3f}, "
+                f"{float(map_point.get('z', 0.0)):.3f}) in {frame}."
+            ),
+            status="pending",
+        )
         result = self._run_openclaw_request(
             "tap goal",
             lambda: self._openclaw.navigate_to(
@@ -269,6 +282,7 @@ class K1MissionBridgeNode(Node):
                 frame,
             ),
         )
+        self._record_openclaw_activity(result)
         if bool(result.get("ok", False)):
             with self._lock:
                 self._last_goal = {
@@ -282,20 +296,34 @@ class K1MissionBridgeNode(Node):
         }
 
     def handle_autonomy(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._append_agent_activity(
+            role="operator",
+            summary="Requested autonomy change.",
+            detail="Enable roaming." if bool(payload.get("enabled", False)) else "Return to MANUAL mode.",
+            status="pending",
+        )
         result = self._run_openclaw_request(
             "autonomy toggle",
             lambda: self._openclaw.set_autonomy(bool(payload.get("enabled", False))),
         )
+        self._record_openclaw_activity(result)
         return {
             "ok": bool(result.get("ok", False)),
             "summary": str(result.get("summary", "autonomy request completed")),
         }
 
     def handle_report(self) -> dict[str, Any]:
+        self._append_agent_activity(
+            role="operator",
+            summary="Requested scene report.",
+            detail="Summarize what the robot currently sees.",
+            status="pending",
+        )
         result = self._run_openclaw_request(
             "scene report",
             self._openclaw.request_report,
         )
+        self._record_openclaw_activity(result)
         report = result.get("report") or {}
         summary = str(result.get("summary", "scene report completed"))
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -314,7 +342,14 @@ class K1MissionBridgeNode(Node):
         return {"ok": bool(result.get("ok", False)), "summary": summary}
 
     def handle_stop(self) -> dict[str, Any]:
+        self._append_agent_activity(
+            role="operator",
+            summary="Requested stop.",
+            detail="Emergency stop or cancel the current robot behavior.",
+            status="pending",
+        )
         result = self._run_openclaw_request("stop", self._openclaw.stop)
+        self._record_openclaw_activity(result)
         if bool(result.get("ok", False)):
             with self._lock:
                 self._last_goal = None
@@ -327,6 +362,61 @@ class K1MissionBridgeNode(Node):
         msg = String()
         msg.data = json.dumps(payload)
         publisher.publish(msg)
+
+    def _append_agent_activity(
+        self,
+        role: str,
+        summary: str,
+        detail: str,
+        status: str,
+    ) -> None:
+        entry = {
+            "id": f"activity-{time.time_ns()}",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "role": role,
+            "summary": summary,
+            "detail": detail,
+            "status": status,
+        }
+        with self._lock:
+            self._agent_activity.insert(0, entry)
+            self._agent_activity = self._agent_activity[:20]
+
+    def _record_openclaw_activity(self, result: dict[str, Any]) -> None:
+        status = "success" if bool(result.get("ok", False)) else "error"
+
+        decision = result.get("decision")
+        if isinstance(decision, dict):
+            detail_parts = []
+            for key in ("skill", "tool", "action", "action_type", "service", "target_mode", "intent", "frame"):
+                value = decision.get(key)
+                if value:
+                    detail_parts.append(f"{key}={value}")
+            self._append_agent_activity(
+                role="assistant",
+                summary=str(result.get("summary", "OpenClaw handled the request.")),
+                detail=", ".join(detail_parts) if detail_parts else "Operator-visible decision trace returned by OpenClaw.",
+                status=status,
+            )
+        else:
+            self._append_agent_activity(
+                role="assistant",
+                summary=str(result.get("summary", "OpenClaw handled the request.")),
+                detail="Operator-visible decision trace was not provided; showing the command summary only.",
+                status=status,
+            )
+
+        activity = result.get("activity")
+        if isinstance(activity, list):
+            for item in reversed(activity[:4]):
+                if not isinstance(item, dict):
+                    continue
+                self._append_agent_activity(
+                    role=str(item.get("role", "assistant")),
+                    summary=str(item.get("summary", result.get("summary", "OpenClaw activity"))),
+                    detail=str(item.get("detail", "")),
+                    status=status,
+                )
 
     def _run_openclaw_request(
         self,

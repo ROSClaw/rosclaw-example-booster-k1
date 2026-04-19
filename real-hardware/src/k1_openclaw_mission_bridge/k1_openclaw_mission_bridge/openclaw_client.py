@@ -32,15 +32,60 @@ Send exactly one navigation goal in the `{frame}` frame to:
 - z: {z:.3f}
 
 Rules:
-- Prefer the existing ROSClaw navigation skill or `ros2_action_goal`.
+- Use the existing `navigate-to` skill if it is available.
+- The navigation path must go through Nav2 using the `/navigate_to_pose` action and the `nav2_msgs/action/NavigateToPose` type.
+- If you cannot use the skill, call `ros2_action_goal` directly with that exact action name and action type.
 - Do not use raw velocity control for this request.
+- Do not use roaming or autonomy-mode services for this one-off destination.
 - If navigation is unavailable, fail instead of improvising.
+- Return an operator-visible decision trace in the JSON so the visionOS app can show what you chose.
 
 Return ONLY JSON:
-{{"ok":true,"summary":"navigation goal sent","goal":{{"frame":"{frame}","x":{x:.3f},"y":{y:.3f},"z":{z:.3f}}}}}
+{{
+  "ok": true,
+  "summary": "navigation goal sent",
+  "decision": {{
+    "skill": "navigate-to",
+    "tool": "ros2_action_goal",
+    "action": "/navigate_to_pose",
+    "action_type": "nav2_msgs/action/NavigateToPose",
+    "frame": "{frame}"
+  }},
+  "activity": [
+    {{
+      "role": "assistant",
+      "summary": "Selected Nav2 tap-to-move.",
+      "detail": "Using the navigate-to workflow for the requested floor target."
+    }},
+    {{
+      "role": "tool",
+      "summary": "Sent /navigate_to_pose goal.",
+      "detail": "Target: ({x:.3f}, {y:.3f}, {z:.3f}) in {frame}."
+    }}
+  ],
+  "goal": {{"frame":"{frame}","x":{x:.3f},"y":{y:.3f},"z":{z:.3f}}}
+}}
 
 Failure JSON:
-{{"ok":false,"summary":"navigation goal failed","goal":null}}
+{{
+  "ok": false,
+  "summary": "navigation goal failed",
+  "decision": {{
+    "skill": "navigate-to",
+    "tool": "ros2_action_goal",
+    "action": "/navigate_to_pose",
+    "action_type": "nav2_msgs/action/NavigateToPose",
+    "frame": "{frame}"
+  }},
+  "activity": [
+    {{
+      "role": "assistant",
+      "summary": "Navigation could not be started.",
+      "detail": "State briefly whether Nav2 was unavailable, the action goal was rejected, or another navigation precondition failed."
+    }}
+  ],
+  "goal": null
+}}
 """.strip()
         return self._run_prompt(prompt)
 
@@ -57,10 +102,24 @@ Rules:
 - Do not use manual velocity streaming.
 
 Return ONLY JSON:
-{"ok":true,"summary":"autonomy enabled"}
+{
+  "ok": true,
+  "summary": "autonomy enabled",
+  "decision": {"service": "/rosclaw/set_autonomy_mode", "target_mode": "FULL_AUTONOMY"},
+  "activity": [
+    {"role": "assistant", "summary": "Enabled autonomous roaming.", "detail": "Switching the robot into FULL_AUTONOMY."}
+  ]
+}
 
 Failure JSON:
-{"ok":false,"summary":"autonomy enable failed"}
+{
+  "ok": false,
+  "summary": "autonomy enable failed",
+  "decision": {"service": "/rosclaw/set_autonomy_mode", "target_mode": "FULL_AUTONOMY"},
+  "activity": [
+    {"role": "assistant", "summary": "Autonomy enable failed.", "detail": "State the shortest useful reason for the operator."}
+  ]
+}
 """.strip()
         else:
             prompt = """
@@ -73,10 +132,24 @@ Rules:
 - Set the mode to MANUAL.
 
 Return ONLY JSON:
-{"ok":true,"summary":"autonomy disabled"}
+{
+  "ok": true,
+  "summary": "autonomy disabled",
+  "decision": {"service": "/rosclaw/set_autonomy_mode", "target_mode": "MANUAL"},
+  "activity": [
+    {"role": "assistant", "summary": "Disabled autonomous roaming.", "detail": "Returning the robot to MANUAL mode."}
+  ]
+}
 
 Failure JSON:
-{"ok":false,"summary":"autonomy disable failed"}
+{
+  "ok": false,
+  "summary": "autonomy disable failed",
+  "decision": {"service": "/rosclaw/set_autonomy_mode", "target_mode": "MANUAL"},
+  "activity": [
+    {"role": "assistant", "summary": "Autonomy disable failed.", "detail": "State the shortest useful reason for the operator."}
+  ]
+}
 """.strip()
         return self._run_prompt(prompt)
 
@@ -92,10 +165,26 @@ Rules:
 - If a snapshot cannot be taken, still summarize the latest scene state if available.
 
 Return ONLY JSON:
-{"ok":true,"summary":"scene report ready","report":{"summary":"short scene summary","labels":["label1","label2"]}}
+{
+  "ok": true,
+  "summary": "scene report ready",
+  "decision": {"tool": "perception_or_camera", "intent": "scene_report"},
+  "activity": [
+    {"role": "assistant", "summary": "Prepared a scene report.", "detail": "Using the current ROSClaw perception path."}
+  ],
+  "report": {"summary":"short scene summary","labels":["label1","label2"]}
+}
 
 Failure JSON:
-{"ok":false,"summary":"scene report failed","report":null}
+{
+  "ok": false,
+  "summary": "scene report failed",
+  "decision": {"tool": "perception_or_camera", "intent": "scene_report"},
+  "activity": [
+    {"role": "assistant", "summary": "Scene report failed.", "detail": "State the shortest useful reason for the operator."}
+  ],
+  "report": null
+}
 """.strip()
         return self._run_prompt(prompt)
 
@@ -110,10 +199,24 @@ Rules:
 - If that is unavailable, cancel the active navigation/autonomy behavior and stop the robot.
 
 Return ONLY JSON:
-{"ok":true,"summary":"stop sent"}
+{
+  "ok": true,
+  "summary": "stop sent",
+  "decision": {"intent": "stop"},
+  "activity": [
+    {"role": "assistant", "summary": "Issued a stop request.", "detail": "Using the safest available stop path."}
+  ]
+}
 
 Failure JSON:
-{"ok":false,"summary":"stop failed"}
+{
+  "ok": false,
+  "summary": "stop failed",
+  "decision": {"intent": "stop"},
+  "activity": [
+    {"role": "assistant", "summary": "Stop request failed.", "detail": "State the shortest useful reason for the operator."}
+  ]
+}
 """.strip()
         return self._run_prompt(prompt)
 

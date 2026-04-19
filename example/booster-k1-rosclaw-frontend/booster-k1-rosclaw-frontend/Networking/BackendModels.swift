@@ -62,6 +62,15 @@ struct ReportItem: Codable, Sendable, Equatable, Identifiable {
     var labels: [String]
 }
 
+struct AgentActivityItem: Codable, Sendable, Equatable, Identifiable {
+    var id: String
+    var timestamp: String
+    var role: String
+    var summary: String
+    var detail: String
+    var status: String
+}
+
 struct BackendStateResponse: Codable, Sendable, Equatable {
     var ok: Bool
     var connectionState: String
@@ -72,6 +81,58 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
     var statusSummary: String
     var lastGoal: GoalState?
     var reports: [ReportItem]
+    var agentActivity: [AgentActivityItem]
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case connectionState
+        case robotPose
+        case autonomy
+        case mapping
+        case currentIntent
+        case statusSummary
+        case lastGoal
+        case reports
+        case agentActivity
+    }
+
+    init(
+        ok: Bool,
+        connectionState: String,
+        robotPose: RobotPose?,
+        autonomy: AutonomyState,
+        mapping: MappingState,
+        currentIntent: String,
+        statusSummary: String,
+        lastGoal: GoalState?,
+        reports: [ReportItem],
+        agentActivity: [AgentActivityItem]
+    ) {
+        self.ok = ok
+        self.connectionState = connectionState
+        self.robotPose = robotPose
+        self.autonomy = autonomy
+        self.mapping = mapping
+        self.currentIntent = currentIntent
+        self.statusSummary = statusSummary
+        self.lastGoal = lastGoal
+        self.reports = reports
+        self.agentActivity = agentActivity
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try container.decode(Bool.self, forKey: .ok)
+        connectionState = try container.decode(String.self, forKey: .connectionState)
+        robotPose = try container.decodeIfPresent(RobotPose.self, forKey: .robotPose)
+        autonomy = try container.decode(AutonomyState.self, forKey: .autonomy)
+        mapping = try container.decode(MappingState.self, forKey: .mapping)
+        currentIntent = try container.decode(String.self, forKey: .currentIntent)
+        statusSummary = try container.decode(String.self, forKey: .statusSummary)
+        lastGoal = try container.decodeIfPresent(GoalState.self, forKey: .lastGoal)
+        reports = try container.decodeIfPresent([ReportItem].self, forKey: .reports) ?? []
+        agentActivity = try container.decodeIfPresent([AgentActivityItem].self, forKey: .agentActivity) ?? []
+    }
 
     static let empty = BackendStateResponse(
         ok: false,
@@ -87,7 +148,8 @@ struct BackendStateResponse: Codable, Sendable, Equatable {
         currentIntent: "Waiting for backend",
         statusSummary: "No backend state yet.",
         lastGoal: nil,
-        reports: []
+        reports: [],
+        agentActivity: []
     )
 }
 

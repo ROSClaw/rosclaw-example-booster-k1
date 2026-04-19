@@ -13,6 +13,7 @@ struct ContentView: View {
                 connectionSection
                 robotSection
                 mappingSection
+                agentActivitySection
                 reportsSection
                 controlSection
             }
@@ -318,6 +319,49 @@ struct ContentView: View {
         }
     }
 
+    private var agentActivitySection: some View {
+        dashboardSection("OpenClaw Activity") {
+            if appModel.backendState.agentActivity.isEmpty {
+                Text("No OpenClaw decisions recorded yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(appModel.backendState.agentActivity.prefix(8)) { item in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text(activityRoleLabel(item.role))
+                                .font(.caption2)
+                                .fontWeight(.bold)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(activityRoleColor(item.role).opacity(0.18), in: Capsule())
+                                .foregroundStyle(activityRoleColor(item.role))
+
+                            Text(item.summary)
+                                .fontWeight(.semibold)
+
+                            Spacer()
+
+                            Text(item.timestamp)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if !item.detail.isEmpty {
+                            Text(item.detail)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text(activityStatusLabel(item.status))
+                            .font(.caption)
+                            .foregroundStyle(activityStatusColor(item.status))
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+    }
+
     private var controlSection: some View {
         dashboardSection("Controls") {
             HStack(spacing: 12) {
@@ -395,6 +439,54 @@ struct ContentView: View {
             return .orange
         case .complete:
             return .green
+        }
+    }
+
+    private func activityRoleLabel(_ role: String) -> String {
+        switch role.lowercased() {
+        case "operator":
+            return "USER"
+        case "tool":
+            return "TOOL"
+        case "assistant":
+            return "AGENT"
+        default:
+            return role.uppercased()
+        }
+    }
+
+    private func activityRoleColor(_ role: String) -> Color {
+        switch role.lowercased() {
+        case "operator":
+            return .orange
+        case "tool":
+            return .cyan
+        default:
+            return .green
+        }
+    }
+
+    private func activityStatusLabel(_ status: String) -> String {
+        switch status.lowercased() {
+        case "success":
+            return "Completed"
+        case "error":
+            return "Failed"
+        case "pending":
+            return "Pending"
+        default:
+            return status.capitalized
+        }
+    }
+
+    private func activityStatusColor(_ status: String) -> Color {
+        switch status.lowercased() {
+        case "success":
+            return .green
+        case "error":
+            return .red
+        default:
+            return .secondary
         }
     }
 }
