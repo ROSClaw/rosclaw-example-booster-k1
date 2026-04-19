@@ -15,6 +15,7 @@ setup(
             "share/" + package_name + "/launch",
             [
                 "launch/k1_cmd_vel_bridge.launch.py",
+                "launch/k1_host_navigation.launch.py",
                 "launch/k1_openclaw_bringup.launch.py",
             ],
         ),
@@ -22,7 +23,9 @@ setup(
             "share/" + package_name + "/config/k1",
             [
                 "config/k1/discovery.yaml",
+                "config/k1/nav2_params.yaml",
                 "config/k1/safety_policy.yaml",
+                "config/k1/slam_toolbox.yaml",
                 "config/k1/perception.yaml",
             ],
         ),

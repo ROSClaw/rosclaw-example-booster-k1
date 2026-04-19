@@ -111,8 +111,9 @@ class K1MissionBridgeNode(Node):
         self.declare_parameter("openclaw_binary", "openclaw")
         self.declare_parameter("openclaw_agent_id", "main")
         self.declare_parameter("openclaw_session_id", "k1-visionos")
-        self.declare_parameter("openclaw_timeout_seconds", 10)
+        self.declare_parameter("openclaw_timeout_seconds", 90)
         self.declare_parameter("enable_openclaw", True)
+        self.declare_parameter("max_tap_step_meters", 0.35)
         self.declare_parameter("spatial_observation_topic", "/visionos/spatial_observation")
         self.declare_parameter("alignment_topic", "/visionos/alignment")
         self.declare_parameter("mapping_status_topic", "/visionos/mapping_status")
@@ -293,7 +294,7 @@ class K1MissionBridgeNode(Node):
     def handle_tap_goal(self, payload: dict[str, Any]) -> dict[str, Any]:
         map_point = payload.get("map_point") or {}
         frame = str(payload.get("frame", "map"))
-        goal_position = {
+        requested_goal = {
             "x": float(map_point.get("x", 0.0)),
             "y": float(map_point.get("y", 0.0)),
             "z": float(map_point.get("z", 0.0)),
@@ -311,16 +312,34 @@ class K1MissionBridgeNode(Node):
             )
             return {"ok": False, "summary": summary}
 
+        goal_position, step_limit = self._limit_tap_goal(frame, requested_goal)
         self._append_agent_activity(
             role="operator",
             summary="Requested tap-to-move.",
             detail=(
-                f"Target floor point: ({goal_position['x']:.3f}, "
-                f"{goal_position['y']:.3f}, "
-                f"{goal_position['z']:.3f}) in {frame}."
+                f"Target floor point: ({requested_goal['x']:.3f}, "
+                f"{requested_goal['y']:.3f}, "
+                f"{requested_goal['z']:.3f}) in {frame}."
             ),
             status="pending",
         )
+        accepted_summary = "Tap goal queued. OpenClaw is deciding how to reach the floor target with Nav2."
+        if step_limit is not None:
+            self._append_agent_activity(
+                role="assistant",
+                summary="Clamped tap target to a short step.",
+                detail=(
+                    f"Requested target was {step_limit['requested_distance_m']:.2f} m away, "
+                    f"so the backend shortened this move to {step_limit['step_distance_m']:.2f} m "
+                    f"at ({goal_position['x']:.3f}, {goal_position['y']:.3f}, {goal_position['z']:.3f}) "
+                    f"in {frame}."
+                ),
+                status="pending",
+            )
+            accepted_summary = (
+                f"Tap goal queued as a {step_limit['step_distance_m']:.2f} m step toward the requested target. "
+                "OpenClaw is deciding how to reach that shorter waypoint with Nav2."
+            )
         summary = self._submit_openclaw_request(
             "tap goal",
             lambda: self._openclaw.navigate_to(
@@ -329,8 +348,13 @@ class K1MissionBridgeNode(Node):
                 goal_position["z"],
                 frame,
             ),
-            accepted_summary="Tap goal queued. OpenClaw is deciding how to reach the floor target with Nav2.",
-            on_success=lambda result: self._store_successful_goal(result, frame, goal_position),
+            accepted_summary=accepted_summary,
+            on_success=lambda result: self._store_successful_goal(
+                result,
+                frame,
+                goal_position,
+                requested_position=requested_goal if step_limit is not None else None,
+            ),
         )
         return {
             "ok": True,
@@ -393,6 +417,39 @@ class K1MissionBridgeNode(Node):
         msg = String()
         msg.data = json.dumps(payload)
         publisher.publish(msg)
+
+    def _limit_tap_goal(
+        self,
+        frame: str,
+        requested_goal: dict[str, float],
+    ) -> tuple[dict[str, float], dict[str, float] | None]:
+        max_step_meters = float(self.get_parameter("max_tap_step_meters").value)
+        if max_step_meters <= 0:
+            return dict(requested_goal), None
+
+        with self._lock:
+            robot_pose = dict(self._robot_pose) if self._robot_pose else None
+
+        if not robot_pose or str(robot_pose.get("frame", "")) != frame:
+            return dict(requested_goal), None
+
+        robot_position = robot_pose.get("position") or {}
+        dx = requested_goal["x"] - float(robot_position.get("x", 0.0))
+        dy = requested_goal["y"] - float(robot_position.get("y", 0.0))
+        distance = math.hypot(dx, dy)
+        if distance <= max_step_meters or distance <= 1e-6:
+            return dict(requested_goal), None
+
+        scale = max_step_meters / distance
+        clamped_goal = {
+            "x": float(robot_position.get("x", 0.0)) + dx * scale,
+            "y": float(robot_position.get("y", 0.0)) + dy * scale,
+            "z": requested_goal["z"],
+        }
+        return clamped_goal, {
+            "requested_distance_m": distance,
+            "step_distance_m": max_step_meters,
+        }
 
     def _nav2_ready(self) -> bool:
         return self._nav2_client is not None and self._nav2_client.server_is_ready()
@@ -520,6 +577,7 @@ class K1MissionBridgeNode(Node):
         result: dict[str, Any],
         frame: str,
         goal_position: dict[str, float],
+        requested_position: dict[str, float] | None = None,
     ) -> None:
         with self._lock:
             self._last_goal = {
@@ -527,6 +585,8 @@ class K1MissionBridgeNode(Node):
                 "position": goal_position,
                 "summary": result.get("summary", "navigation goal sent"),
             }
+            if requested_position is not None:
+                self._last_goal["requested_position"] = requested_position
 
     def _store_successful_report(self, result: dict[str, Any]) -> None:
         report = result.get("report") or {}

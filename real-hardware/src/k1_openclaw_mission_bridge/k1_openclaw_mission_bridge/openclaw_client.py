@@ -272,6 +272,7 @@ Failure JSON:
             return direct_response
 
         json_objects = cls._parse_json_objects(raw_output)
+        payload_texts: list[str] = []
 
         for candidate in reversed(json_objects):
             direct_response = cls._coerce_command_response(candidate)
@@ -283,10 +284,14 @@ Failure JSON:
                 payload_text = cls._extract_text_payload(envelope)
             except OpenClawClientError:
                 continue
+            payload_texts.append(payload_text)
 
             direct_response = cls._coerce_command_response(payload_text)
             if direct_response is not None:
                 return direct_response
+
+        if payload_texts:
+            raise OpenClawClientError(cls._summarize_payload_text(payload_texts))
 
         raise OpenClawClientError("OpenClaw returned no parseable command response.")
 
@@ -313,6 +318,23 @@ Failure JSON:
         return combined
 
     @classmethod
+    def _summarize_payload_text(cls, payload_texts: list[str]) -> str:
+        combined = "\n".join(text.strip() for text in payload_texts if isinstance(text, str) and text.strip())
+        if not combined:
+            return "OpenClaw returned no parseable command response."
+
+        normalized = combined.lower()
+        if "api rate limit reached" in normalized:
+            return "OpenClaw model provider hit an API rate limit. Please try again later."
+        if "credit balance is too low" in normalized or "purchase credits" in normalized:
+            return "OpenClaw model provider has insufficient credits for this request."
+        if "llm request rejected:" in normalized:
+            return combined.split(":", 1)[1].strip() if ":" in combined else combined
+
+        cleaned = combined.replace("⚠️", "").strip()
+        return cleaned or combined
+
+    @classmethod
     def _parse_json_objects(cls, raw_output: str) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
 
@@ -326,6 +348,11 @@ Failure JSON:
         try:
             append_candidate(json.loads(raw_output))
         except json.JSONDecodeError:
+            pass
+
+        try:
+            append_candidate(json.loads(cls._extract_json(raw_output)))
+        except (json.JSONDecodeError, OpenClawClientError):
             pass
 
         for line in raw_output.splitlines():

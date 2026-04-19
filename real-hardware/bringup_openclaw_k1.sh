@@ -21,6 +21,7 @@ ENSURE_ROBOT_RELAY="true"
 ENABLE_CMD_VEL_BRIDGE="true"
 ENABLE_VISIONOS_BACKEND="true"
 ENABLE_STEREO_CAMERA_BRIDGE="true"
+ENABLE_NAVIGATION_STACK="true"
 RELAY_ONLY="false"
 FORCE_ROBOT_RELAY_BUILD="false"
 FORCE_LOCAL_HOST_BUILD="false"
@@ -34,10 +35,12 @@ AUTONOMY_START_DELAY_SEC="${AUTONOMY_START_DELAY_SEC:-3}"
 VISIONOS_BACKEND_PORT="${VISIONOS_BACKEND_PORT:-8088}"
 VISIONOS_OPENCLAW_AGENT_ID="${VISIONOS_OPENCLAW_AGENT_ID:-main}"
 VISIONOS_OPENCLAW_SESSION_ID="${VISIONOS_OPENCLAW_SESSION_ID:-${VISIONOS_OPENCLAW_SESSION_KEY:-k1-visionos}}"
-VISIONOS_OPENCLAW_TIMEOUT_SECONDS="${VISIONOS_OPENCLAW_TIMEOUT_SECONDS:-10}"
+VISIONOS_OPENCLAW_TIMEOUT_SECONDS="${VISIONOS_OPENCLAW_TIMEOUT_SECONDS:-90}"
+VISIONOS_MAX_TAP_STEP_METERS="${VISIONOS_MAX_TAP_STEP_METERS:-0.35}"
 ROSCLAW_REPO_CONFIG_ROOT_DEFAULT="${SCRIPT_DIR}/src/k1_cmd_vel_bridge/config"
 STEREO_STREAM_HOST="${K1_STEREO_STREAM_HOST:-}"
 STEREO_STREAM_PORT="${K1_STEREO_STREAM_PORT:-5600}"
+TELEMETRY_STREAM_PORT="${K1_TELEMETRY_STREAM_PORT:-5601}"
 STEREO_STREAM_OUTPUT_ENCODING="${K1_STEREO_STREAM_OUTPUT_ENCODING:-mono8}"
 STEREO_STREAM_OUTPUT_WIDTH="${K1_STEREO_STREAM_OUTPUT_WIDTH:-512}"
 STEREO_STREAM_OUTPUT_HEIGHT="${K1_STEREO_STREAM_OUTPUT_HEIGHT:-512}"
@@ -45,6 +48,8 @@ STEREO_STREAM_MAX_FPS="${K1_STEREO_STREAM_MAX_FPS:-12.0}"
 STEREO_STREAM_JPEG_QUALITY="${K1_STEREO_STREAM_JPEG_QUALITY:-80}"
 
 EXTRA_LAUNCH_ARGS=()
+NAV2_REQUIRED_NODES=(controller_server planner_server behavior_server bt_navigator)
+NAV2_OPTIONAL_NODES=(waypoint_follower velocity_smoother smoother_server)
 
 usage() {
   cat <<EOF
@@ -80,6 +85,7 @@ Options:
   --no-cmd-vel-bridge       Skip the local /cmd_vel -> Booster RPC bridge.
   --no-visionos-backend     Skip launching the visionOS HTTP/OpenClaw backend.
   --no-stereo-camera-bridge Skip launching the stereo camera host bridge.
+  --no-navigation-stack     Skip launching the host-side Nav2 + SLAM stack.
   --cmd-vel-topic TOPIC     Twist topic to bridge.
                             Default: ${CMD_VEL_TOPIC}
   --rpc-service-name NAME   Booster locomotion RPC service name.
@@ -95,6 +101,8 @@ Options:
                         Falls back to legacy VISIONOS_OPENCLAW_SESSION_KEY.
   Environment override: VISIONOS_OPENCLAW_TIMEOUT_SECONDS
                         Default: ${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}
+  Environment override: VISIONOS_MAX_TAP_STEP_METERS
+                        Default: ${VISIONOS_MAX_TAP_STEP_METERS}
   --force-local-host-build
                             Rebuild relevant local host packages in
                             real-hardware before launching.
@@ -128,10 +136,126 @@ die() {
   exit 1
 }
 
+free_tcp_port() {
+  local port="$1"
+  local label="$2"
+  local pids=""
+
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v fuser >/dev/null 2>&1; then
+    pids="$(fuser -n tcp "${port}" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${pids//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  log "Stopping stale ${label} listener(s) on tcp:${port}: ${pids//$'\n'/ }"
+  # shellcheck disable=SC2086
+  kill ${pids} >/dev/null 2>&1 || true
+  sleep 1
+
+  local remaining=""
+  if command -v lsof >/dev/null 2>&1; then
+    remaining="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v fuser >/dev/null 2>&1; then
+    remaining="$(fuser -n tcp "${port}" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "${remaining//[[:space:]]/}" ]]; then
+    die "Unable to free tcp:${port} for ${label}. Remaining listener(s): ${remaining//$'\n'/ }"
+  fi
+}
+
+cleanup_stale_local_host_processes() {
+  local patterns=(
+    "/opt/ros/humble/lib/nav2_controller/controller_server"
+    "/opt/ros/humble/lib/nav2_planner/planner_server"
+    "/opt/ros/humble/lib/nav2_behaviors/behavior_server"
+    "/opt/ros/humble/lib/nav2_bt_navigator/bt_navigator"
+    "/opt/ros/humble/lib/nav2_waypoint_follower/waypoint_follower"
+    "/opt/ros/humble/lib/nav2_velocity_smoother/velocity_smoother"
+    "/opt/ros/humble/lib/nav2_smoother/smoother_server"
+    "/opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager"
+    "/opt/ros/humble/lib/slam_toolbox/async_slam_toolbox_node"
+    "ros2 launch k1_cmd_vel_bridge k1_host_navigation.launch.py"
+    "ros2 launch k1_openclaw_mission_bridge k1_visionos_backend.launch.py"
+    "k1_openclaw_mission_bridge_server"
+    "python3 /opt/ros/humble/lib/rosbridge_server/rosbridge_websocket"
+    "ros2 launch rosclaw_bringup rosclaw.launch.py"
+    "rosclaw_autonomy/autonomy_node"
+    "k1_cmd_vel_bridge_node"
+    "k1_stereo_stream_client_node"
+    "k1_telemetry_stream_client_node"
+  )
+  local pids=""
+  local pattern
+  local matched=()
+
+  for pattern in "${patterns[@]}"; do
+    pids="$(pgrep -f "${pattern}" 2>/dev/null || true)"
+    if [[ -n "${pids//[[:space:]]/}" ]]; then
+      matched+=("${pattern}")
+      pkill -f "${pattern}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  if [[ ${#matched[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  log "Stopping stale local host ROS processes before relaunch"
+  sleep 2
+
+  for pattern in "${matched[@]}"; do
+    pids="$(pgrep -f "${pattern}" 2>/dev/null || true)"
+    if [[ -n "${pids//[[:space:]]/}" ]]; then
+      pkill -9 -f "${pattern}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  sleep 1
+}
+
+resolve_openclaw_cli_path() {
+  if [[ "${ENABLE_VISIONOS_BACKEND}" != "true" ]]; then
+    return 0
+  fi
+
+  if command -v openclaw >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local candidate_dirs=(
+    "${HOME}/.local/bin"
+    "${HOME}/bin"
+  )
+  local discovered_openclaw=""
+  while IFS= read -r -d '' discovered_openclaw; do
+    candidate_dirs+=("$(dirname "${discovered_openclaw}")")
+  done < <(find "${HOME}/.nvm/versions/node" -type f -name openclaw -path '*/bin/openclaw' -print0 2>/dev/null || true)
+
+  local candidate_dir=""
+  for candidate_dir in "${candidate_dirs[@]}"; do
+    [[ -d "${candidate_dir}" ]] || continue
+    case ":${PATH}:" in
+      *":${candidate_dir}:"*) ;;
+      *) export PATH="${candidate_dir}:${PATH}" ;;
+    esac
+    if command -v openclaw >/dev/null 2>&1; then
+      log "Resolved OpenClaw CLI at $(command -v openclaw)"
+      return 0
+    fi
+  done
+}
+
 warn_openclaw_preflight() {
   if [[ "${ENABLE_VISIONOS_BACKEND}" != "true" ]]; then
     return 0
   fi
+
+  resolve_openclaw_cli_path
 
   local openclaw_bin
   openclaw_bin="$(command -v openclaw 2>/dev/null || true)"
@@ -140,7 +264,7 @@ warn_openclaw_preflight() {
     return 0
   fi
 
-  log "visionOS backend OpenClaw settings: agent_id=${VISIONOS_OPENCLAW_AGENT_ID} session_id=${VISIONOS_OPENCLAW_SESSION_ID} timeout=${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}s"
+  log "visionOS backend OpenClaw settings: agent_id=${VISIONOS_OPENCLAW_AGENT_ID} session_id=${VISIONOS_OPENCLAW_SESSION_ID} timeout=${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}s max_tap_step=${VISIONOS_MAX_TAP_STEP_METERS}m"
 
   local validate_output=""
   if ! validate_output="$("${openclaw_bin}" config validate 2>&1)"; then
@@ -408,6 +532,10 @@ ensure_local_host_packages() {
     schedule_local_host_package_group "stereo camera bridge" k1_low_level_relay
   fi
 
+  if [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]]; then
+    schedule_local_host_package_group "host navigation stack" booster_interface k1_cmd_vel_bridge k1_low_level_relay
+  fi
+
   if [[ ${#LOCAL_HOST_BUILD_PACKAGES[@]} -gt 0 ]]; then
     build_local_host_packages "${LOCAL_HOST_BUILD_PACKAGES[@]}"
     source_local_host_env
@@ -501,6 +629,10 @@ while (($# > 0)); do
       ENABLE_STEREO_CAMERA_BRIDGE="false"
       shift
       ;;
+    --no-navigation-stack)
+      ENABLE_NAVIGATION_STACK="false"
+      shift
+      ;;
     --cmd-vel-topic)
       CMD_VEL_TOPIC="$2"
       shift 2
@@ -570,6 +702,9 @@ fi
 if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
   RUN_LOCAL_HOST_STACK="true"
 fi
+if [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]]; then
+  RUN_LOCAL_HOST_STACK="true"
+fi
 
 if [[ "${RELAY_ONLY}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
   [[ -f "${ROSCLAW_SETUP_BASH}" ]] || die "Missing ROSClaw overlay setup: ${ROSCLAW_SETUP_BASH}"
@@ -585,7 +720,11 @@ mkdir -p "${ROS_LOG_DIR}"
 trap stop_ssh_master EXIT
 
 ensure_robot_relay() {
-  local remote_check_script remote_prep_script remote_build_script remote_launch_script
+  local remote_check_script remote_build_needed_script remote_prep_script remote_build_script remote_launch_script
+  local relay_source_checksum
+  local depth_reencode_checksum
+  relay_source_checksum="$(sha256sum "${SCRIPT_DIR}/src/k1_low_level_relay/k1_low_level_relay/relay_node.py" | awk '{print $1}')"
+  depth_reencode_checksum="$(sha256sum "${SCRIPT_DIR}/src/k1_low_level_relay/k1_low_level_relay/depth_reencode_node.py" | awk '{print $1}')"
 
   log "Ensuring robot relay on ${ROBOT_HOST}"
   start_ssh_master
@@ -594,33 +733,78 @@ ensure_robot_relay() {
     remote_check_script=$(cat <<'EOF'
 set -euo pipefail
 robot_ws="$1"
+expected_relay_checksum="$2"
+expected_depth_checksum="$3"
+stream_port="$4"
+telemetry_port="$5"
 low_node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
 camera_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_stereo_stream_server_node"
-if [[ -x "${low_node_exe}" ]] && [[ -x "${camera_server_exe}" ]] && \
+depth_reencode_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_depth_reencode_node"
+telemetry_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_telemetry_stream_server_node"
+depth_scan_pattern="depthimage_to_laserscan_node"
+relay_module="$(find "${robot_ws}/install/k1_low_level_relay/lib" -path '*/site-packages/k1_low_level_relay/relay_node.py' -print -quit 2>/dev/null || true)"
+depth_module="$(find "${robot_ws}/install/k1_low_level_relay/lib" -path '*/site-packages/k1_low_level_relay/depth_reencode_node.py' -print -quit 2>/dev/null || true)"
+actual_relay_checksum=""
+actual_depth_checksum=""
+if [[ -n "${relay_module}" ]]; then
+  actual_relay_checksum="$(sha256sum "${relay_module}" | awk '{print $1}')"
+fi
+if [[ -n "${depth_module}" ]]; then
+  actual_depth_checksum="$(sha256sum "${depth_module}" | awk '{print $1}')"
+fi
+camera_port_ready="false"
+telemetry_port_ready="false"
+if command -v ss >/dev/null 2>&1; then
+  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${stream_port}$"; then
+    camera_port_ready="true"
+  fi
+  if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${telemetry_port}$"; then
+    telemetry_port_ready="true"
+  fi
+fi
+if [[ "${actual_relay_checksum}" == "${expected_relay_checksum}" ]] && \
+   [[ "${actual_depth_checksum}" == "${expected_depth_checksum}" ]] && \
+   [[ -x "${low_node_exe}" ]] && [[ -x "${camera_server_exe}" ]] && [[ -x "${depth_reencode_exe}" ]] && [[ -x "${telemetry_server_exe}" ]] && \
    pgrep -f "${low_node_exe}" >/dev/null 2>&1 && \
-   pgrep -f "${camera_server_exe}" >/dev/null 2>&1; then
+   pgrep -f "${camera_server_exe}" >/dev/null 2>&1 && \
+   pgrep -f "${depth_reencode_exe}" >/dev/null 2>&1 && \
+   pgrep -f "${telemetry_server_exe}" >/dev/null 2>&1 && \
+   pgrep -f "${depth_scan_pattern}" >/dev/null 2>&1 && \
+   [[ "${camera_port_ready}" == "true" ]] && \
+   [[ "${telemetry_port_ready}" == "true" ]]; then
   exit 0
 fi
 exit 1
 EOF
 )
-    if run_remote_script "${remote_check_script}" "${ROBOT_RELAY_WS}"; then
+    if run_remote_script "${remote_check_script}" "${ROBOT_RELAY_WS}" "${relay_source_checksum}" "${depth_reencode_checksum}" "${STEREO_STREAM_PORT}" "${TELEMETRY_STREAM_PORT}"; then
       log "Robot relay is already running; skipping deploy/build"
       return 0
     fi
   fi
 
-  remote_check_script=$(cat <<'EOF'
+  remote_build_needed_script=$(cat <<'EOF'
 set -euo pipefail
 robot_ws="$1"
-if [[ -f "${robot_ws}/install/setup.bash" ]]; then
+expected_relay_checksum="$2"
+expected_depth_checksum="$3"
+relay_module="$(find "${robot_ws}/install/k1_low_level_relay/lib" -path '*/site-packages/k1_low_level_relay/relay_node.py' -print -quit 2>/dev/null || true)"
+depth_module="$(find "${robot_ws}/install/k1_low_level_relay/lib" -path '*/site-packages/k1_low_level_relay/depth_reencode_node.py' -print -quit 2>/dev/null || true)"
+depth_reencode_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_depth_reencode_node"
+telemetry_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_telemetry_stream_server_node"
+if [[ ! -f "${robot_ws}/install/setup.bash" ]] || [[ -z "${relay_module}" ]] || [[ -z "${depth_module}" ]] || [[ ! -x "${depth_reencode_exe}" ]] || [[ ! -x "${telemetry_server_exe}" ]]; then
+  exit 0
+fi
+actual_relay_checksum="$(sha256sum "${relay_module}" | awk '{print $1}')"
+actual_depth_checksum="$(sha256sum "${depth_module}" | awk '{print $1}')"
+if [[ "${actual_relay_checksum}" != "${expected_relay_checksum}" ]] || [[ "${actual_depth_checksum}" != "${expected_depth_checksum}" ]]; then
   exit 0
 fi
 exit 1
 EOF
 )
 
-  if [[ "${FORCE_ROBOT_RELAY_BUILD}" == "true" ]] || ! run_remote_script "${remote_check_script}" "${ROBOT_RELAY_WS}"; then
+  if [[ "${FORCE_ROBOT_RELAY_BUILD}" == "true" ]] || run_remote_script "${remote_build_needed_script}" "${ROBOT_RELAY_WS}" "${relay_source_checksum}" "${depth_reencode_checksum}"; then
     log "Preparing relay workspace on robot at ${ROBOT_RELAY_WS}"
     remote_prep_script=$(cat <<'EOF'
 set -euo pipefail
@@ -663,20 +847,32 @@ set -eo pipefail
 robot_ws="$1"
 low_node_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_low_level_relay_node"
 camera_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_stereo_stream_server_node"
+depth_reencode_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_depth_reencode_node"
+telemetry_server_exe="${robot_ws}/install/k1_low_level_relay/lib/k1_low_level_relay/k1_telemetry_stream_server_node"
+depth_scan_pattern="depthimage_to_laserscan_node"
 stream_port="$2"
-output_encoding="$3"
-output_width="$4"
-output_height="$5"
-max_fps="$6"
-jpeg_quality="$7"
+telemetry_port="$3"
+output_encoding="$4"
+output_width="$5"
+output_height="$6"
+max_fps="$7"
+jpeg_quality="$8"
+scan_height="$9"
+scan_range_min="${10}"
+scan_range_max="${11}"
 pkill -f "${low_node_exe}" >/dev/null 2>&1 || true
 pkill -f "${camera_server_exe}" >/dev/null 2>&1 || true
+pkill -f "${depth_reencode_exe}" >/dev/null 2>&1 || true
+pkill -f "${telemetry_server_exe}" >/dev/null 2>&1 || true
+pkill -f "${depth_scan_pattern}" >/dev/null 2>&1 || true
 set +u
 source /opt/ros/humble/setup.bash >/dev/null 2>&1
 source /opt/booster/BoosterRos2/install/setup.bash >/dev/null 2>&1
 source "${robot_ws}/install/setup.bash"
 set -u
 unset FASTDDS_DEFAULT_PROFILES_FILE RMW_IMPLEMENTATION
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile_udp_only.xml
 export FASTRTPS_DEFAULT_PROFILES_FILE=/opt/booster/BoosterRos2/fastdds_profile_udp_only.xml
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
@@ -691,20 +887,43 @@ nohup "${camera_server_exe}" --ros-args -r __node:=k1_stereo_stream_server \
   -p "output_height:=${output_height}" \
   -p "max_fps:=${max_fps}" \
   -p "jpeg_quality:=${jpeg_quality}" >/tmp/k1-camera-stream-server.log 2>&1 < /dev/null &
+nohup "${telemetry_server_exe}" --ros-args -r __node:=k1_telemetry_stream_server \
+  -p "bind_host:=0.0.0.0" \
+  -p "port:=${telemetry_port}" >/tmp/k1-telemetry-stream-server.log 2>&1 < /dev/null &
+nohup "${depth_reencode_exe}" --ros-args -r __node:=k1_depth_reencode \
+  -p "input_topic:=/StereoNetNode/stereonet_depth" \
+  -p "output_topic:=/k1/depth_image_16uc1" >/tmp/k1-depth-reencode.log 2>&1 < /dev/null &
+nohup ros2 run depthimage_to_laserscan depthimage_to_laserscan_node --ros-args \
+  -r "depth:=/k1/depth_image_16uc1" \
+  -r "depth_camera_info:=/StereoNetNode/stereonet_depth/camera_info" \
+  -r "scan:=/scan" \
+  -p "scan_height:=${scan_height}" \
+  -p "range_min:=${scan_range_min}" \
+  -p "range_max:=${scan_range_max}" \
+  -p "output_frame:=trunk_link" >/tmp/k1-depth-to-scan.log 2>&1 < /dev/null &
 sleep 3
 pgrep -af "${low_node_exe}"
 pgrep -af "${camera_server_exe}"
+pgrep -af "${telemetry_server_exe}"
+pgrep -af "${depth_reencode_exe}"
+pgrep -af "${depth_scan_pattern}"
+ss -ltn | awk '{print $4}' | grep -Eq "[:.]${stream_port}$"
+ss -ltn | awk '{print $4}' | grep -Eq "[:.]${telemetry_port}$"
 EOF
 )
   run_remote_script \
     "${remote_launch_script}" \
     "${ROBOT_RELAY_WS}" \
     "${STEREO_STREAM_PORT}" \
+    "${TELEMETRY_STREAM_PORT}" \
     "${STEREO_STREAM_OUTPUT_ENCODING}" \
     "${STEREO_STREAM_OUTPUT_WIDTH}" \
     "${STEREO_STREAM_OUTPUT_HEIGHT}" \
     "${STEREO_STREAM_MAX_FPS}" \
-    "${STEREO_STREAM_JPEG_QUALITY}"
+    "${STEREO_STREAM_JPEG_QUALITY}" \
+    "30" \
+    "0.35" \
+    "5.0"
 }
 
 if [[ "${ENSURE_ROBOT_RELAY}" == "true" ]]; then
@@ -721,6 +940,13 @@ if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
   source_local_host_env
   ensure_local_host_packages
   log "ROS 2 CLI note: if another shell shows an incomplete topic list, source ${LOCAL_DDS_SETUP} there and run 'ros2 daemon stop' or use '--no-daemon'."
+  cleanup_stale_local_host_processes
+  if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
+    free_tcp_port "${VISIONOS_BACKEND_PORT}" "visionOS backend"
+  fi
+  if [[ "${ENABLE_ROSCLAW_PACKAGES}" == "true" && "${ENABLE_ROSBRIDGE}" == "true" ]]; then
+    free_tcp_port "9090" "rosbridge websocket"
+  fi
   if [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
     if ! package_available booster_interface; then
       die "booster_interface is not available in the sourced overlays. Build the real-hardware workspace."
@@ -754,6 +980,23 @@ if [[ "${DRY_RUN}" != "true" && "${RUN_LOCAL_HOST_STACK}" == "true" ]]; then
       die "k1_low_level_relay is not available in the sourced overlays. Build the real-hardware workspace."
     fi
   fi
+  if [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]]; then
+    if ! package_available booster_interface; then
+      die "booster_interface is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! package_available k1_cmd_vel_bridge; then
+      die "k1_cmd_vel_bridge is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! package_available k1_low_level_relay; then
+      die "k1_low_level_relay is not available in the sourced overlays. Build the real-hardware workspace."
+    fi
+    if ! ros2 pkg prefix nav2_bringup >/dev/null 2>&1; then
+      die "nav2_bringup is not installed on this host. Install the ROS 2 Nav2 packages before enabling tap-to-move."
+    fi
+    if ! ros2 pkg prefix slam_toolbox >/dev/null 2>&1; then
+      die "slam_toolbox is not installed on this host. Install slam_toolbox before enabling tap-to-move."
+    fi
+  fi
 fi
 
 LOCAL_LAUNCH_COMMAND=(
@@ -778,6 +1021,12 @@ AUTONOMY_COMMAND=(
   -p "default_executor:=${AUTONOMY_DEFAULT_EXECUTOR}"
   -p "idle_roam_strategy:=${AUTONOMY_IDLE_ROAM_STRATEGY}"
   -p "cmd_vel_topic:=${CMD_VEL_TOPIC}"
+  -p "odom_topic:=/odom"
+  -p "scan_topic:=/k1/scan"
+)
+
+NAVIGATION_STACK_COMMAND=(
+  ros2 launch k1_cmd_vel_bridge k1_host_navigation.launch.py
 )
 
 VISIONOS_BACKEND_COMMAND=(
@@ -786,6 +1035,7 @@ VISIONOS_BACKEND_COMMAND=(
   "openclaw_agent_id:=${VISIONOS_OPENCLAW_AGENT_ID}"
   "openclaw_session_id:=${VISIONOS_OPENCLAW_SESSION_ID}"
   "openclaw_timeout_seconds:=${VISIONOS_OPENCLAW_TIMEOUT_SECONDS}"
+  "max_tap_step_meters:=${VISIONOS_MAX_TAP_STEP_METERS}"
 )
 
 CAMERA_STREAM_CLIENT_COMMAND=(
@@ -795,7 +1045,22 @@ CAMERA_STREAM_CLIENT_COMMAND=(
   -p "server_port:=${STEREO_STREAM_PORT}"
 )
 
+TELEMETRY_STREAM_CLIENT_COMMAND=(
+  ros2 run k1_low_level_relay k1_telemetry_stream_client_node
+  --ros-args
+  -p "server_host:=${STEREO_STREAM_HOST}"
+  -p "server_port:=${TELEMETRY_STREAM_PORT}"
+)
+
 cleanup() {
+  if [[ -n "${backend_probe_pid:-}" ]]; then
+    kill "${backend_probe_pid}" >/dev/null 2>&1 || true
+    wait "${backend_probe_pid}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${navigation_stack_pid:-}" ]]; then
+    kill "${navigation_stack_pid}" >/dev/null 2>&1 || true
+    wait "${navigation_stack_pid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${autonomy_pid:-}" ]]; then
     kill "${autonomy_pid}" >/dev/null 2>&1 || true
     wait "${autonomy_pid}" >/dev/null 2>&1 || true
@@ -808,6 +1073,10 @@ cleanup() {
     kill "${camera_stream_client_pid}" >/dev/null 2>&1 || true
     wait "${camera_stream_client_pid}" >/dev/null 2>&1 || true
   fi
+  if [[ -n "${telemetry_stream_client_pid:-}" ]]; then
+    kill "${telemetry_stream_client_pid}" >/dev/null 2>&1 || true
+    wait "${telemetry_stream_client_pid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${visionos_backend_pid:-}" ]]; then
     kill "${visionos_backend_pid}" >/dev/null 2>&1 || true
     wait "${visionos_backend_pid}" >/dev/null 2>&1 || true
@@ -818,6 +1087,118 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+schedule_backend_probe() {
+  if [[ "${ENABLE_VISIONOS_BACKEND}" != "true" ]]; then
+    return 0
+  fi
+
+  local probe_script="${SCRIPT_DIR}/probe_visionos_backend.py"
+  if [[ ! -f "${probe_script}" ]]; then
+    return 0
+  fi
+
+  local delay_seconds="$1"
+  (
+    sleep "${delay_seconds}"
+    python3 "${probe_script}" \
+      --base-url "http://127.0.0.1:${VISIONOS_BACKEND_PORT}" \
+      --timeout 4.0 2>/dev/null | while IFS= read -r line; do
+        [[ -n "${line}" ]] && log "backend probe: ${line}"
+      done
+  ) &
+  backend_probe_pid=$!
+}
+
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${timeout_seconds}" "$@"
+  else
+    "$@"
+  fi
+}
+
+nav2_action_server_ready() {
+  local action_info=""
+  action_info="$(ros2 action info /navigate_to_pose 2>/dev/null || true)"
+  grep -q "Action servers: 1" <<< "${action_info}"
+}
+
+nav2_lifecycle_state() {
+  local node_name="${1#/}"
+  local state_output=""
+
+  state_output="$(run_with_timeout 5 ros2 lifecycle get "/${node_name}" 2>/dev/null || true)"
+  awk 'NR == 1 { print $1 }' <<< "${state_output}"
+}
+
+recover_nav2_lifecycle() {
+  local timeout_seconds="${1:-45}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local node_name=""
+  local node_state=""
+  local all_required_active="false"
+
+  [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]] || return 0
+
+  while (( SECONDS < deadline )); do
+    all_required_active="true"
+
+    for node_name in "${NAV2_REQUIRED_NODES[@]}"; do
+      node_state="$(nav2_lifecycle_state "${node_name}")"
+      case "${node_state}" in
+        active)
+          ;;
+        inactive)
+          all_required_active="false"
+          log "Nav2 recovery: activating ${node_name}"
+          run_with_timeout 20 ros2 lifecycle set "/${node_name}" activate >/dev/null 2>&1 || true
+          ;;
+        unconfigured)
+          all_required_active="false"
+          log "Nav2 recovery: configuring ${node_name}"
+          run_with_timeout 20 ros2 lifecycle set "/${node_name}" configure >/dev/null 2>&1 || true
+          ;;
+        "")
+          all_required_active="false"
+          ;;
+        *)
+          all_required_active="false"
+          ;;
+      esac
+    done
+
+    for node_name in "${NAV2_OPTIONAL_NODES[@]}"; do
+      node_state="$(nav2_lifecycle_state "${node_name}")"
+      case "${node_state}" in
+        inactive)
+          log "Nav2 recovery: activating ${node_name}"
+          run_with_timeout 15 ros2 lifecycle set "/${node_name}" activate >/dev/null 2>&1 || true
+          ;;
+        unconfigured)
+          log "Nav2 recovery: configuring ${node_name}"
+          run_with_timeout 15 ros2 lifecycle set "/${node_name}" configure >/dev/null 2>&1 || true
+          ;;
+      esac
+    done
+
+    if [[ "${all_required_active}" == "true" ]] && nav2_action_server_ready; then
+      log "Nav2 /navigate_to_pose action server is ready and lifecycle nodes are active"
+      return 0
+    fi
+
+    sleep 2
+  done
+
+  log "Nav2 recovery timed out after ${timeout_seconds}s"
+  for node_name in "${NAV2_REQUIRED_NODES[@]}" "${NAV2_OPTIONAL_NODES[@]}"; do
+    log "  ${node_name}: $(nav2_lifecycle_state "${node_name}")"
+  done
+  return 1
+}
 
 if [[ "${RUN_LOCAL_HOST_STACK}" != "true" ]]; then
   log "No local host packages requested; nothing else to launch"
@@ -830,6 +1211,10 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   fi
   if [[ "${ENABLE_STEREO_CAMERA_BRIDGE}" == "true" ]]; then
     run_cmd "${CAMERA_STREAM_CLIENT_COMMAND[@]}"
+  fi
+  run_cmd "${TELEMETRY_STREAM_CLIENT_COMMAND[@]}"
+  if [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]]; then
+    run_cmd "${NAVIGATION_STACK_COMMAND[@]}"
   fi
   if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
     run_cmd "${VISIONOS_BACKEND_COMMAND[@]}"
@@ -847,6 +1232,15 @@ else
     "${CAMERA_STREAM_CLIENT_COMMAND[@]}" &
     camera_stream_client_pid=$!
     sleep 2
+  fi
+  "${TELEMETRY_STREAM_CLIENT_COMMAND[@]}" &
+  telemetry_stream_client_pid=$!
+  sleep 2
+  if [[ "${ENABLE_NAVIGATION_STACK}" == "true" ]]; then
+    "${NAVIGATION_STACK_COMMAND[@]}" &
+    navigation_stack_pid=$!
+    sleep 4
+    recover_nav2_lifecycle 60 || true
   fi
   if [[ "${ENABLE_VISIONOS_BACKEND}" == "true" ]]; then
     "${VISIONOS_BACKEND_COMMAND[@]}" &
@@ -867,17 +1261,26 @@ else
         log "Launching rosclaw_autonomy (startup_mode=${AUTONOMY_STARTUP_MODE})"
         "${AUTONOMY_COMMAND[@]}" &
         autonomy_pid=$!
+        schedule_backend_probe 6
       else
         log "Skipping rosclaw_autonomy launch because rosclaw_bringup exited early"
+        schedule_backend_probe 3
       fi
+    else
+      schedule_backend_probe 3
     fi
     wait "${rosclaw_pid}"
   elif [[ "${ENABLE_CMD_VEL_BRIDGE}" == "true" ]]; then
+    schedule_backend_probe 3
     exec "${BRIDGE_COMMAND[@]}"
-  elif [[ -n "${camera_stream_client_pid:-}" || -n "${visionos_backend_pid:-}" ]]; then
+  elif [[ -n "${camera_stream_client_pid:-}" || -n "${telemetry_stream_client_pid:-}" || -n "${visionos_backend_pid:-}" ]]; then
+    schedule_backend_probe 3
     auxiliary_pids=()
     if [[ -n "${camera_stream_client_pid:-}" ]]; then
       auxiliary_pids+=("${camera_stream_client_pid}")
+    fi
+    if [[ -n "${telemetry_stream_client_pid:-}" ]]; then
+      auxiliary_pids+=("${telemetry_stream_client_pid}")
     fi
     if [[ -n "${visionos_backend_pid:-}" ]]; then
       auxiliary_pids+=("${visionos_backend_pid}")

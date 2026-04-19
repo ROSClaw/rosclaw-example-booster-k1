@@ -87,6 +87,9 @@ To probe the backend from the host that is actually serving visionOS requests:
 python3 ./real-hardware/probe_visionos_backend.py --base-url http://192.168.2.126:8088
 ```
 
+That probe now prints a compact state summary as well, including whether the
+backend sees a live Nav2 `/navigate_to_pose` action server.
+
 Useful overrides for that bringup path include:
 
 - `VISIONOS_OPENCLAW_AGENT_ID`

@@ -13,8 +13,11 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>k1_low_level_relay</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rosclaw_bringup</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

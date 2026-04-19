@@ -21,7 +21,11 @@ setup(
     license="MIT",
     entry_points={
         "console_scripts": [
+            "k1_depth_reencode_node = k1_low_level_relay.depth_reencode_node:main",
             "k1_low_level_relay_node = k1_low_level_relay.relay_node:main",
+            "k1_odometer_bridge_node = k1_low_level_relay.odometer_bridge_node:main",
+            "k1_telemetry_stream_server_node = k1_low_level_relay.telemetry_stream_server_node:main",
+            "k1_telemetry_stream_client_node = k1_low_level_relay.telemetry_stream_client_node:main",
             "k1_stereo_stream_server_node = k1_low_level_relay.stereo_stream_server_node:main",
             "k1_stereo_stream_client_node = k1_low_level_relay.stereo_stream_client_node:main",
         ],
