@@ -115,6 +115,7 @@ class K1MissionBridgeNode(Node):
         self._lock = threading.Lock()
         self._openclaw_lock = threading.Lock()
         self._openclaw_active_request: str | None = None
+        self._openclaw_active_since: float | None = None
         self._robot_pose: dict[str, Any] | None = None
         self._autonomy = {
             "enabled": False,
@@ -227,6 +228,18 @@ class K1MissionBridgeNode(Node):
             reports = list(self._reports)
             agent_activity = list(self._agent_activity)
             current_intent = self._current_intent
+            openclaw_active_request = self._openclaw_active_request
+            openclaw_active_since = self._openclaw_active_since
+
+        status_summary = current_intent
+        if openclaw_active_request:
+            elapsed_seconds = 0
+            if openclaw_active_since is not None:
+                elapsed_seconds = max(0, int(time.time() - openclaw_active_since))
+            status_summary = (
+                f"OpenClaw is processing {openclaw_active_request} "
+                f"({elapsed_seconds}s elapsed)."
+            )
 
         return {
             "ok": True,
@@ -235,7 +248,7 @@ class K1MissionBridgeNode(Node):
             "autonomy": autonomy,
             "mapping": mapping,
             "current_intent": current_intent,
-            "status_summary": current_intent,
+            "status_summary": status_summary,
             "last_goal": last_goal,
             "reports": reports,
             "agent_activity": agent_activity,
@@ -263,36 +276,35 @@ class K1MissionBridgeNode(Node):
     def handle_tap_goal(self, payload: dict[str, Any]) -> dict[str, Any]:
         map_point = payload.get("map_point") or {}
         frame = str(payload.get("frame", "map"))
+        goal_position = {
+            "x": float(map_point.get("x", 0.0)),
+            "y": float(map_point.get("y", 0.0)),
+            "z": float(map_point.get("z", 0.0)),
+        }
         self._append_agent_activity(
             role="operator",
             summary="Requested tap-to-move.",
             detail=(
-                f"Target floor point: ({float(map_point.get('x', 0.0)):.3f}, "
-                f"{float(map_point.get('y', 0.0)):.3f}, "
-                f"{float(map_point.get('z', 0.0)):.3f}) in {frame}."
+                f"Target floor point: ({goal_position['x']:.3f}, "
+                f"{goal_position['y']:.3f}, "
+                f"{goal_position['z']:.3f}) in {frame}."
             ),
             status="pending",
         )
-        result = self._run_openclaw_request(
+        summary = self._submit_openclaw_request(
             "tap goal",
             lambda: self._openclaw.navigate_to(
-                float(map_point.get("x", 0.0)),
-                float(map_point.get("y", 0.0)),
-                float(map_point.get("z", 0.0)),
+                goal_position["x"],
+                goal_position["y"],
+                goal_position["z"],
                 frame,
             ),
+            accepted_summary="Tap goal queued. OpenClaw is deciding how to reach the floor target with Nav2.",
+            on_success=lambda result: self._store_successful_goal(result, frame, goal_position),
         )
-        self._record_openclaw_activity(result)
-        if bool(result.get("ok", False)):
-            with self._lock:
-                self._last_goal = {
-                    "frame": frame,
-                    "position": map_point,
-                    "summary": result.get("summary", "navigation goal sent"),
-                }
         return {
-            "ok": bool(result.get("ok", False)),
-            "summary": str(result.get("summary", "navigation request completed")),
+            "ok": True,
+            "summary": summary,
         }
 
     def handle_autonomy(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -302,14 +314,16 @@ class K1MissionBridgeNode(Node):
             detail="Enable roaming." if bool(payload.get("enabled", False)) else "Return to MANUAL mode.",
             status="pending",
         )
-        result = self._run_openclaw_request(
+        summary = self._submit_openclaw_request(
             "autonomy toggle",
             lambda: self._openclaw.set_autonomy(bool(payload.get("enabled", False))),
+            accepted_summary=(
+                "Autonomy change queued. OpenClaw is updating the robot mode."
+            ),
         )
-        self._record_openclaw_activity(result)
         return {
-            "ok": bool(result.get("ok", False)),
-            "summary": str(result.get("summary", "autonomy request completed")),
+            "ok": True,
+            "summary": summary,
         }
 
     def handle_report(self) -> dict[str, Any]:
@@ -319,27 +333,13 @@ class K1MissionBridgeNode(Node):
             detail="Summarize what the robot currently sees.",
             status="pending",
         )
-        result = self._run_openclaw_request(
+        summary = self._submit_openclaw_request(
             "scene report",
             self._openclaw.request_report,
+            accepted_summary="Scene report queued. OpenClaw is gathering the current robot view.",
+            on_success=self._store_successful_report,
         )
-        self._record_openclaw_activity(result)
-        report = result.get("report") or {}
-        summary = str(result.get("summary", "scene report completed"))
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if bool(result.get("ok", False)) and report:
-            with self._lock:
-                self._reports.insert(
-                    0,
-                    {
-                        "id": f"report-{int(time.time() * 1000)}",
-                        "timestamp": timestamp,
-                        "summary": str(report.get("summary", summary)),
-                        "labels": list(report.get("labels", [])),
-                    },
-                )
-                self._reports = self._reports[:10]
-        return {"ok": bool(result.get("ok", False)), "summary": summary}
+        return {"ok": True, "summary": summary}
 
     def handle_stop(self) -> dict[str, Any]:
         self._append_agent_activity(
@@ -348,14 +348,15 @@ class K1MissionBridgeNode(Node):
             detail="Emergency stop or cancel the current robot behavior.",
             status="pending",
         )
-        result = self._run_openclaw_request("stop", self._openclaw.stop)
-        self._record_openclaw_activity(result)
-        if bool(result.get("ok", False)):
-            with self._lock:
-                self._last_goal = None
+        summary = self._submit_openclaw_request(
+            "stop",
+            self._openclaw.stop,
+            accepted_summary="Stop request queued. OpenClaw is taking the safest available stop path.",
+            on_success=lambda _result: self._clear_last_goal(),
+        )
         return {
-            "ok": bool(result.get("ok", False)),
-            "summary": str(result.get("summary", "stop request completed")),
+            "ok": True,
+            "summary": summary,
         }
 
     def _publish_json(self, publisher, payload: dict[str, Any]) -> None:
@@ -418,24 +419,104 @@ class K1MissionBridgeNode(Node):
                     status=status,
                 )
 
-    def _run_openclaw_request(
+    def _submit_openclaw_request(
         self,
         label: str,
         action: Callable[[], dict[str, Any]],
-    ) -> dict[str, Any]:
-        acquired = self._openclaw_lock.acquire(timeout=0.1)
-        if not acquired:
-            active_request = self._openclaw_active_request or "another request"
-            raise OpenClawClientError(
-                f"OpenClaw is still processing {active_request}. Wait for it to finish before sending another command."
-            )
+        accepted_summary: str,
+        on_success: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        with self._lock:
+            active_request = self._openclaw_active_request
+            if active_request is not None:
+                raise OpenClawClientError(
+                    f"OpenClaw is still processing {active_request}. Wait for it to finish before sending another command."
+                )
+            self._openclaw_active_request = label
+            self._openclaw_active_since = time.time()
 
-        self._openclaw_active_request = label
+        self._append_agent_activity(
+            role="assistant",
+            summary=f"OpenClaw is processing {label}.",
+            detail="The request was accepted by the bridge and is being handled in the background.",
+            status="pending",
+        )
+
+        worker = threading.Thread(
+            target=self._execute_openclaw_request,
+            args=(label, action, on_success),
+            daemon=True,
+        )
+        worker.start()
+        return accepted_summary
+
+    def _execute_openclaw_request(
+        self,
+        label: str,
+        action: Callable[[], dict[str, Any]],
+        on_success: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
         try:
-            return action()
+            with self._openclaw_lock:
+                result = action()
+            self._record_openclaw_activity(result)
+            if bool(result.get("ok", False)) and on_success is not None:
+                on_success(result)
+        except OpenClawClientError as exc:
+            self._append_agent_activity(
+                role="assistant",
+                summary=f"OpenClaw {label} failed.",
+                detail=str(exc),
+                status="error",
+            )
+        except Exception as exc:  # pragma: no cover - defensive worker guard
+            self.get_logger().exception("unexpected error while processing %s", label)
+            self._append_agent_activity(
+                role="assistant",
+                summary=f"OpenClaw {label} crashed.",
+                detail=str(exc),
+                status="error",
+            )
         finally:
-            self._openclaw_active_request = None
-            self._openclaw_lock.release()
+            with self._lock:
+                self._openclaw_active_request = None
+                self._openclaw_active_since = None
+
+    def _store_successful_goal(
+        self,
+        result: dict[str, Any],
+        frame: str,
+        goal_position: dict[str, float],
+    ) -> None:
+        with self._lock:
+            self._last_goal = {
+                "frame": frame,
+                "position": goal_position,
+                "summary": result.get("summary", "navigation goal sent"),
+            }
+
+    def _store_successful_report(self, result: dict[str, Any]) -> None:
+        report = result.get("report") or {}
+        if not report:
+            return
+
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        summary = str(result.get("summary", "scene report completed"))
+        with self._lock:
+            self._reports.insert(
+                0,
+                {
+                    "id": f"report-{int(time.time() * 1000)}",
+                    "timestamp": timestamp,
+                    "summary": str(report.get("summary", summary)),
+                    "labels": list(report.get("labels", [])),
+                },
+            )
+            self._reports = self._reports[:10]
+
+    def _clear_last_goal(self) -> None:
+        with self._lock:
+            self._last_goal = None
 
 
 def main(args=None) -> None:
